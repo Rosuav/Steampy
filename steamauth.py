@@ -9,6 +9,7 @@ import rsa # ImportError? 'pip install rsa' or equivalent.
 import sys
 sys.path.append("protobuf")
 import steammessages_auth.steamclient_pb2
+import steammessages_base_pb2
 
 def handle_errors(task):
 	try:
@@ -51,13 +52,36 @@ async def login():
 		spawn(recv(conn))
 		user = "Rosuav"
 		password = "not-my-real-password"
+		import getpass; password = getpass.getpass()
 		data = requests.post("https://steamcommunity.com/login/getrsakey", {"username": user}).json()
 		key = rsa.PublicKey(int(data["publickey_mod"], 16),
 			int(data["publickey_exp"], 16))
 		password = password.encode("ascii") # Encoding error? See if Steam uses UTF-8.
 		password = base64.b64encode(rsa.encrypt(password, key))
-		print(password)
+		msg = steammessages_auth.steamclient_pb2.CAuthentication_BeginAuthSessionViaCredentials_Request(
+			account_name=user,
+			#website_id=details.WebsiteID,
+			#guard_data=details.GuardData, # Retain this to allow passwordless relogin
+			encrypted_password=password,
+			#encryption_timestamp=publicKey.timestamp,
+			#device_details = new CAuthentication_DeviceDetails
+		)
+		emsg = 9804 # or use 151 once we're authed
+		hdr = steammessages_base_pb2.CMsgProtoBufHeader(
+			#messageid=emsg, # Does this need to be here as well?
+			# Do we need to set the source job ID?
+			target_job_name="Authentication.BeginAuthSessionViaCredentials#1",
+			jobid_source=123,
+			jobid_target=123,
+		)
+		hdr = hdr.SerializeToString()
+		data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
+		#print(base64.b64encode(data))
+		#import hashlib; print(hashlib.sha256(data).hexdigest())
+		await conn.send(data)
+		print("Sent...")
 		await asyncio.sleep(3)
+		print("Ending.")
 
 async def main():
 	await login()
