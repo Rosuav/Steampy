@@ -9,6 +9,7 @@ import rsa # ImportError? 'pip install rsa' or equivalent.
 import sys
 sys.path.append("protobuf")
 import steammessages_auth.steamclient_pb2
+import steammessages_twofactor.steamclient_pb2
 import steammessages_base_pb2
 
 def handle_errors(task):
@@ -48,23 +49,41 @@ async def login():
 	# 5. steamUser.LogOn( new SteamUser.LogOnDetails)
 	endpoint = "ext1-syd1.steamserver.net:27037"
 	async with websockets.connect(f"wss://{endpoint}/cmsocket/") as conn:
-		print(conn)
 		spawn(recv(conn))
+
+		# Before trying to log in, can we just get time synchronization?
+		msg = steammessages_twofactor.steamclient_pb2.CTwoFactor_Time_Request()
+		emsg = 9804 # or use 151 once we're authed
+		hdr = steammessages_base_pb2.CMsgProtoBufHeader(
+			target_job_name="TwoFactor.QueryTime#1",
+			jobid_source=1,
+		)
+		hdr = hdr.SerializeToString()
+		data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
+		await conn.send(data)
+
 		user = "Rosuav"
 		password = "not-my-real-password"
-		import getpass; password = getpass.getpass()
-		data = requests.post("https://steamcommunity.com/login/getrsakey", {"username": user}).json()
-		key = rsa.PublicKey(int(data["publickey_mod"], 16),
-			int(data["publickey_exp"], 16))
+		# import getpass; password = getpass.getpass()
+		pk = requests.post("https://steamcommunity.com/login/getrsakey", {"username": user}).json()
+		key = rsa.PublicKey(int(pk["publickey_mod"], 16),
+			int(pk["publickey_exp"], 16))
 		password = password.encode("ascii") # Encoding error? See if Steam uses UTF-8.
 		password = base64.b64encode(rsa.encrypt(password, key))
 		msg = steammessages_auth.steamclient_pb2.CAuthentication_BeginAuthSessionViaCredentials_Request(
+			device_friendly_name="SteamAuthPy",
 			account_name=user,
-			#website_id=details.WebsiteID,
+			website_id="Mobile",
+			platform_type=1, # Steam client
 			#guard_data=details.GuardData, # Retain this to allow passwordless relogin
 			encrypted_password=password,
-			#encryption_timestamp=publicKey.timestamp,
+			encryption_timestamp=int(pk["timestamp"]),
 			#device_details = new CAuthentication_DeviceDetails
+			# optional bool remember_login = 5;
+			# optional .ESessionPersistence persistence = 7 [default = k_ESessionPersistence_Persistent];
+			# optional .CAuthentication_DeviceDetails device_details = 9;
+			# optional uint32 language = 11;
+			# optional int32 qos_level = 12 [default = 2];
 		)
 		emsg = 9804 # or use 151 once we're authed
 		hdr = steammessages_base_pb2.CMsgProtoBufHeader(
@@ -78,7 +97,7 @@ async def login():
 		data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
 		#print(base64.b64encode(data))
 		#import hashlib; print(hashlib.sha256(data).hexdigest())
-		await conn.send(data)
+		#await conn.send(data)
 		print("Sent...")
 		await asyncio.sleep(3)
 		print("Ending.")
