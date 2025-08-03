@@ -37,6 +37,13 @@ async def recv(conn):
 		data = await conn.recv()
 		print("RECEIVED", data)
 
+# To test a message's decoding:
+# msg = "CLmdtLLJvf7t5QESEBRD03J1KBMlnaPyKh6VmBg="
+# msg = base64.b64decode(msg)
+# print(steammessages_auth.steamclient_pb2.CAuthentication_PollAuthSessionStatus_Request.FromString(msg))
+# Seems to be fine; the inner layers of message don't seem to be an issue. It's the wrapping around them that
+# we're having issues with - the CMsgProtoBufHeader perhaps.
+
 async def login():
 	# 1. requests.get("https://api.steampowered.com/ISteamDirectory/GetCMListForConnect/v1/").json()
 	# and pick out an entry with type "websockets"
