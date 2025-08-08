@@ -32,6 +32,15 @@ def spawn(awaitable):
 	task.add_done_callback(task_done)
 	return task
 
+def timecheck():
+	msg = steammessages_twofactor.steamclient_pb2.CTwoFactor_Time_Request()
+	resp = requests.post("https://api.steampowered.com/ITwoFactorService/QueryTime/v1", data={
+		"input_protobuf_encoded": base64.b64encode(msg.SerializeToString()),
+	})
+	reply = steammessages_twofactor.steamclient_pb2.CTwoFactor_Time_Request.FromString(resp.content)
+	import time
+	print(reply.sender_time - time.time())
+
 async def recv(conn):
 	while True:
 		data = await conn.recv()
