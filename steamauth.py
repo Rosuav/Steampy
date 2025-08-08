@@ -6,14 +6,15 @@ import websockets
 import rsa # ImportError? 'pip install rsa' or equivalent.
 
 # Protobuf structures are all in a git-ignored directory
-import sys
-from importlib import import_module
+import sys, importlib
 sys.path.append("protobuf")
-message_types = {
-	"Authentication": import_module("steammessages_auth.steamclient_pb2"),
-	"TwoFactor": import_module("steammessages_twofactor.steamclient_pb2"),
-}
-import steammessages_base_pb2
+import steammessages_base_pb2 # Might not need this eventually
+services_by_name = { }
+def import_service(modname):
+	mod = importlib.import_module(modname)
+	services_by_name.update(mod.DESCRIPTOR.services_by_name)
+import_service("steammessages_auth.steamclient_pb2")
+import_service("steammessages_twofactor.steamclient_pb2")
 
 def handle_errors(task):
 	try:
@@ -35,16 +36,18 @@ def spawn(awaitable):
 	task.add_done_callback(task_done)
 	return task
 
-def protobuf_http(service, endpoint, cls=None, /, **args):
-	if cls is None: cls = endpoint
-	msg = getattr(message_types[service], "C%s_%s_Request" % (service, cls))(**args)
-	resp = requests.post("https://api.steampowered.com/I%sService/%s/v1" % (service, endpoint), data={
+def protobuf_http(service, method, /, **args):
+	srv = services_by_name[service] # Error here probably means we need to import another module of protobufs
+	meth = srv.methods_by_name[method] # Error here likely means a bug, wrong method name for this service
+	# Using private attribute _concrete_class seems wrong, is there a better way to construct this?
+	msg = meth.input_type._concrete_class(**args)
+	resp = requests.post("https://api.steampowered.com/I%sService/%s/v1" % (service, method), data={
 		"input_protobuf_encoded": base64.b64encode(msg.SerializeToString()),
 	})
-	return getattr(message_types[service], "C%s_%s_Response" % (service, cls)).FromString(resp.content)
+	return meth.output_type._concrete_class.FromString(resp.content)
 
 def timecheck():
-	reply = protobuf_http("TwoFactor", "QueryTime", "Time")
+	reply = protobuf_http("TwoFactor", "QueryTime")
 	import time
 	print(reply)
 	print(reply.server_time - time.time())
@@ -82,15 +85,15 @@ async def login():
 		spawn(recv(conn))
 
 		# Before trying to log in, can we just get time synchronization?
-		msg = message_types["TwoFactor"].CTwoFactor_Time_Request()
-		emsg = 9804 # or use 151 once we're authed
-		hdr = steammessages_base_pb2.CMsgProtoBufHeader(
-			target_job_name="TwoFactor.QueryTime#1",
-			jobid_source=1,
-		)
-		hdr = hdr.SerializeToString()
-		data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
-		await conn.send(data)
+		# msg = message_types["TwoFactor"].CTwoFactor_Time_Request()
+		# emsg = 9804 # or use 151 once we're authed
+		# hdr = steammessages_base_pb2.CMsgProtoBufHeader(
+			# target_job_name="TwoFactor.QueryTime#1",
+			# jobid_source=1,
+		# )
+		# hdr = hdr.SerializeToString()
+		# data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
+		# await conn.send(data)
 
 		user = "Rosuav"
 		password = "not-my-real-password"
@@ -100,7 +103,7 @@ async def login():
 			int(pk["publickey_exp"], 16))
 		password = password.encode("ascii") # Encoding error? See if Steam uses UTF-8.
 		password = base64.b64encode(rsa.encrypt(password, key))
-		msg = message_types["Authentication"].CAuthentication_BeginAuthSessionViaCredentials_Request(
+		reply = protobuf_http("Authentication", "BeginAuthSessionViaCredentials",
 			device_friendly_name="SteamAuthPy",
 			account_name=user,
 			website_id="Mobile",
@@ -115,6 +118,7 @@ async def login():
 			# optional uint32 language = 11;
 			# optional int32 qos_level = 12 [default = 2];
 		)
+		print(reply)
 		emsg = 9804 # or use 151 once we're authed
 		hdr = steammessages_base_pb2.CMsgProtoBufHeader(
 			#messageid=emsg, # Does this need to be here as well?
@@ -124,7 +128,7 @@ async def login():
 			jobid_target=123,
 		)
 		hdr = hdr.SerializeToString()
-		data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
+		# data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
 		#print(base64.b64encode(data))
 		#import hashlib; print(hashlib.sha256(data).hexdigest())
 		#await conn.send(data)
