@@ -7,9 +7,12 @@ import rsa # ImportError? 'pip install rsa' or equivalent.
 
 # Protobuf structures are all in a git-ignored directory
 import sys
+from importlib import import_module
 sys.path.append("protobuf")
-import steammessages_auth.steamclient_pb2
-import steammessages_twofactor.steamclient_pb2
+message_types = {
+	"Authentication": import_module("steammessages_auth.steamclient_pb2"),
+	"TwoFactor": import_module("steammessages_twofactor.steamclient_pb2"),
+}
 import steammessages_base_pb2
 
 def handle_errors(task):
@@ -32,14 +35,25 @@ def spawn(awaitable):
 	task.add_done_callback(task_done)
 	return task
 
-def timecheck():
-	msg = steammessages_twofactor.steamclient_pb2.CTwoFactor_Time_Request()
-	resp = requests.post("https://api.steampowered.com/ITwoFactorService/QueryTime/v1", data={
+def protobuf_http(service, endpoint, cls=None, /, **args):
+	if cls is None: cls = endpoint
+	msg = getattr(message_types[service], "C%s_%s_Request" % (service, cls))(**args)
+	resp = requests.post("https://api.steampowered.com/I%sService/%s/v1" % (service, endpoint), data={
 		"input_protobuf_encoded": base64.b64encode(msg.SerializeToString()),
 	})
-	reply = steammessages_twofactor.steamclient_pb2.CTwoFactor_Time_Request.FromString(resp.content)
+	return getattr(message_types[service], "C%s_%s_Response" % (service, cls)).FromString(resp.content)
+
+def timecheck():
+	reply = protobuf_http("TwoFactor", "QueryTime", "Time")
 	import time
-	print(reply.sender_time - time.time())
+	print(reply)
+	print(reply.server_time - time.time())
+
+def make_qr():
+	print(protobuf_http("Authentication", "BeginAuthSessionViaQR"))
+	# Hypothetically, the QR code auth flow would start with the above, then generate a QR code
+	# from reply.challenge_url. The user points the Steam app at the challenge URL QR code. We
+	# poll (every reply.interval seconds) using PollAuthSessionStatus until we get a reply.
 
 async def recv(conn):
 	while True:
@@ -68,7 +82,7 @@ async def login():
 		spawn(recv(conn))
 
 		# Before trying to log in, can we just get time synchronization?
-		msg = steammessages_twofactor.steamclient_pb2.CTwoFactor_Time_Request()
+		msg = message_types["TwoFactor"].CTwoFactor_Time_Request()
 		emsg = 9804 # or use 151 once we're authed
 		hdr = steammessages_base_pb2.CMsgProtoBufHeader(
 			target_job_name="TwoFactor.QueryTime#1",
@@ -86,7 +100,7 @@ async def login():
 			int(pk["publickey_exp"], 16))
 		password = password.encode("ascii") # Encoding error? See if Steam uses UTF-8.
 		password = base64.b64encode(rsa.encrypt(password, key))
-		msg = steammessages_auth.steamclient_pb2.CAuthentication_BeginAuthSessionViaCredentials_Request(
+		msg = message_types["Authentication"].CAuthentication_BeginAuthSessionViaCredentials_Request(
 			device_friendly_name="SteamAuthPy",
 			account_name=user,
 			website_id="Mobile",
