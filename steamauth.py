@@ -1,6 +1,7 @@
 import asyncio
 import traceback
 import base64
+import json
 import requests
 import websockets
 import rsa # ImportError? 'pip install rsa' or equivalent.
@@ -97,13 +98,13 @@ async def login():
 
 		user = "Rosuav"
 		password = "not-my-real-password"
-		# import getpass; password = getpass.getpass()
+		import getpass; password = getpass.getpass()
 		pk = requests.post("https://steamcommunity.com/login/getrsakey", {"username": user}).json()
 		key = rsa.PublicKey(int(pk["publickey_mod"], 16),
 			int(pk["publickey_exp"], 16))
 		password = password.encode("ascii") # Encoding error? See if Steam uses UTF-8.
 		password = base64.b64encode(rsa.encrypt(password, key))
-		reply = protobuf_http("Authentication", "BeginAuthSessionViaCredentials",
+		login = protobuf_http("Authentication", "BeginAuthSessionViaCredentials",
 			device_friendly_name="SteamAuthPy",
 			account_name=user,
 			website_id="Mobile",
@@ -112,13 +113,28 @@ async def login():
 			encrypted_password=password,
 			encryption_timestamp=int(pk["timestamp"]),
 			#device_details = new CAuthentication_DeviceDetails
-			# optional bool remember_login = 5;
-			# optional .ESessionPersistence persistence = 7 [default = k_ESessionPersistence_Persistent];
+			remember_login=True,
+			persistence=1,
+			device_details={"platform_type": 1, "app_type": 1},
 			# optional .CAuthentication_DeviceDetails device_details = 9;
 			# optional uint32 language = 11;
 			# optional int32 qos_level = 12 [default = 2];
 		)
-		print(reply)
+		twofer = getpass.getpass("2FA: ")
+		protobuf_http("Authentication", "UpdateAuthSessionWithSteamGuardCode",
+			client_id=login.client_id,
+			steamid=login.steamid,
+			code=twofer,
+			code_type=3,
+		)
+		sess = protobuf_http("Authentication", "PollAuthSessionStatus",
+			client_id=login.client_id,
+			request_id=login.request_id,
+		)
+		data = {f.name: v for f, v in sess.ListFields()}
+		#with open("SECRET.json", "w") as f: json.dump(data, f)
+		print(list(data))
+		print("----")
 		emsg = 9804 # or use 151 once we're authed
 		hdr = steammessages_base_pb2.CMsgProtoBufHeader(
 			#messageid=emsg, # Does this need to be here as well?
