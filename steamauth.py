@@ -16,7 +16,7 @@ def import_service(modname):
 	services_by_name.update(mod.DESCRIPTOR.services_by_name)
 import_service("steammessages_auth.steamclient_pb2")
 import_service("steammessages_twofactor.steamclient_pb2")
-import_service("steammessages_notifications.steamclient_pb2")
+# TODO: Get the webui protobufs going, and add webui/service_steamnotification.proto in its compiled form
 
 def handle_errors(task):
 	try:
