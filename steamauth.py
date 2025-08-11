@@ -68,7 +68,7 @@ async def protobuf_ws(conn, service, method, /, **args):
 	emsg = 9804
 	hdr = steammessages_base_pb2.CMsgProtoBufHeader(
 		target_job_name=service + "." + method + "#1",
-		jobid_source=1,
+		jobid_source=12347,
 	)
 	hdr = hdr.SerializeToString()
 	data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
@@ -86,10 +86,49 @@ def make_qr():
 	# from reply.challenge_url. The user points the Steam app at the challenge URL QR code. We
 	# poll (every reply.interval seconds) using PollAuthSessionStatus until we get a reply.
 
+def parse_response(data):
+	emsg = int.from_bytes(data[:4], "little")
+	if emsg & 0x80000000:
+		# It's protobuf
+		emsg &= 0x7fffffff
+		if emsg == 1:
+			# EMsgMulti
+			# No idea what the next four bytes mean
+			# print("Next four bytes", int.from_bytes(data[4:8], "little"))
+			multi = steammessages_base_pb2.CMsgMulti.FromString(data[8:])
+			print("Multi", multi)
+			if multi.size_unzipped:
+				print("HAS COMPRESSED DATA")
+				# Not sure what to do with this yet
+			msg = multi.message_body
+			while msg:
+				size = int.from_bytes(msg[:4], "little")
+				raw = msg[4:4+size]
+				msg = msg[size+4:]
+				parse_response(raw)
+		elif emsg == 2:
+			# EMsgProtobufWrapped - not sure if we see this
+			msg = steammessages_base_pb2.CMsgProtobufWrapped.FromString(data[4:]).message_body
+			print("PBWrapped", msg)
+		elif emsg == 147:
+			# EMsgServiceMethodResponse
+			print("Response", data)
+			# Again, not sure what the next four bytes mean
+			hdr = steammessages_base_pb2.CMsgProtoBufHeader.FromString(data[8:])
+			print(hdr)
+		else:
+			print("Unknown emsg", emsg, data)
+			return
+	else:
+		# Non-protobuf messages, not currently parsed
+		print("Non-protobuf", emsg, data[4:])
+
+parse_response(b'\x01\x00\x00\x80\x00\x00\x00\x00\x12\xbf\x80\x80\x80\x00;\x00\x00\x00\x93\x00\x00\x803\x00\x00\x00\t\x00\x00\x00\x00\x00\x00\x00\x00\x10\x8f\xa6\xe3\x13Y;0\x00\x00\x00\x00\x00\x00b\x15TwoFactor.QueryTime#1h\x0f\x88\x01\x01')
+
 async def recv(conn):
 	while True:
 		data = await conn.recv()
-		print("RECEIVED", data)
+		parse_response(data)
 
 # To test a message's decoding:
 # msg = "CLmdtLLJvf7t5QESEBRD03J1KBMlnaPyKh6VmBg="
@@ -211,4 +250,4 @@ async def main():
 	# await notifs()
 	await get_time()
 
-asyncio.run(main())
+#asyncio.run(main())
