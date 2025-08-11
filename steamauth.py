@@ -14,9 +14,12 @@ services_by_name = { }
 def import_service(modname):
 	mod = importlib.import_module(modname)
 	services_by_name.update(mod.DESCRIPTOR.services_by_name)
-import_service("steammessages_auth.steamclient_pb2")
-import_service("steammessages_twofactor.steamclient_pb2")
-# TODO: Get the webui protobufs going, and add webui/service_steamnotification.proto in its compiled form
+#import_service("steammessages_auth.steamclient_pb2")
+#import_service("steammessages_twofactor.steamclient_pb2")
+sys.path.append("pb_webui")
+import_service("service_steamnotification_pb2")
+# TODO: Figure out how to load up two separate namespaces of protobufs. Currently,
+# loading anything from pb_webui breaks the main protobuf collection.
 
 def handle_errors(task):
 	try:
@@ -38,14 +41,22 @@ def spawn(awaitable):
 	task.add_done_callback(task_done)
 	return task
 
-def protobuf_http(service, method, /, **args):
+def protobuf_http(service, method, /, _http_method="POST", _credentials=None, **args):
 	srv = services_by_name[service] # Error here probably means we need to import another module of protobufs
 	meth = srv.methods_by_name[method] # Error here likely means a bug, wrong method name for this service
 	# Using private attribute _concrete_class seems wrong, is there a better way to construct this?
 	msg = meth.input_type._concrete_class(**args)
-	resp = requests.post("https://api.steampowered.com/I%sService/%s/v1" % (service, method), data={
+	xtra = { }
+	xtra["params" if _http_method == "GET" else "data"] = params = {
 		"input_protobuf_encoded": base64.b64encode(msg.SerializeToString()),
-	})
+	}
+	if _credentials: params["access_token"] = _credentials["access_token"]
+	resp = requests.request(_http_method, "https://api.steampowered.com/I%sService/%s/v1" % (service, method), **xtra)
+	if resp.headers["Content-Type"] != "application/octet-stream":
+		print("Bad response")
+		print(resp.headers)
+		print(resp.content)
+		raise Exception() # can't be bothered
 	return meth.output_type._concrete_class.FromString(resp.content)
 
 def timecheck():
@@ -97,7 +108,7 @@ async def login():
 		# data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
 		# await conn.send(data)
 
-		user = "Rosuav"
+		user = "sanctified_toaster"
 		password = "not-my-real-password"
 		import getpass; password = getpass.getpass()
 		pk = requests.post("https://steamcommunity.com/login/getrsakey", {"username": user}).json()
@@ -153,7 +164,13 @@ async def login():
 		await asyncio.sleep(3)
 		print("Ending.")
 
+async def notifs():
+	with open("SECRET.json") as f: creds = json.load(f)
+	prefs = protobuf_http("SteamNotification", "GetPreferences", _http_method="GET", _credentials=creds)
+	print(prefs)
+
 async def main():
-	await login()
+	# await login()
+	await notifs()
 
 asyncio.run(main())

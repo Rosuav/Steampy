@@ -1,2 +1,3 @@
 protobuf/*
+pb_webui/*
 SECRET.json
