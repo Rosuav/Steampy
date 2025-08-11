@@ -1,7 +1,8 @@
 import asyncio
-import traceback
 import base64
+import itertools
 import json
+import traceback
 import requests
 import websockets
 import rsa # ImportError? 'pip install rsa' or equivalent.
@@ -59,20 +60,47 @@ def protobuf_http(service, method, /, _http_method="POST", _credentials=None, **
 		raise Exception() # can't be bothered
 	return meth.output_type._concrete_class.FromString(resp.content)
 
-async def protobuf_ws(conn, service, method, /, **args):
+steamsock = None
+jobid = itertools.count(1)
+jobs_pending = { }
+async def websocket_listen(notif=None):
+	global steamsock
+	endpoint = "ext1-syd1.steamserver.net:27037"
+	async with websockets.connect(f"wss://{endpoint}/cmsocket/") as steamsock:
+		emsg = 9805 # ClientHello
+		import steammessages_clientserver_login_pb2
+		msg = steammessages_clientserver_login_pb2.CMsgClientHello(protocol_version=65581)
+		hdr = steammessages_base_pb2.CMsgProtoBufHeader(
+			jobid_source=2,
+		)
+		hdr = hdr.SerializeToString()
+		data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
+		await steamsock.send(data)
+		if notif: notif.set_result(steamsock)
+		while True:
+			data = await steamsock.recv()
+			parse_response(data)
+
+async def protobuf_ws(service, method, /, **args):
+	if steamsock is None:
+		f = asyncio.Future()
+		spawn(websocket_listen(f))
+		await f
 	srv = services_by_name[service] # Error here probably means we need to import another module of protobufs
 	meth = srv.methods_by_name[method] # Error here likely means a bug, wrong method name for this service
 	# Using private attribute _concrete_class seems wrong, is there a better way to construct this?
 	msg = meth.input_type._concrete_class(**args)
-	# TODO: Sync this up with its response
 	emsg = 9804
+	job = next(jobid)
+	jobs_pending[job] = fut = asyncio.Future()
 	hdr = steammessages_base_pb2.CMsgProtoBufHeader(
 		target_job_name=service + "." + method + "#1",
-		jobid_source=12347,
+		jobid_source=job,
 	)
 	hdr = hdr.SerializeToString()
 	data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
-	await conn.send(data)
+	await steamsock.send(data)
+	return await fut
 
 def timecheck():
 	reply = protobuf_http("TwoFactor", "QueryTime")
@@ -115,7 +143,10 @@ def parse_response(data):
 			print("Response", data)
 			# Again, not sure what the next four bytes mean
 			hdr = steammessages_base_pb2.CMsgProtoBufHeader.FromString(data[8:])
+			fut = jobs_pending.pop(hdr.jobid_target, None)
 			print(hdr)
+			# TODO: Dig another level in and get the actual result
+			if fut: fut.set_result(hdr)
 		else:
 			print("Unknown emsg", emsg, data)
 			return
@@ -124,11 +155,6 @@ def parse_response(data):
 		print("Non-protobuf", emsg, data[4:])
 
 parse_response(b'\x01\x00\x00\x80\x00\x00\x00\x00\x12\xbf\x80\x80\x80\x00;\x00\x00\x00\x93\x00\x00\x803\x00\x00\x00\t\x00\x00\x00\x00\x00\x00\x00\x00\x10\x8f\xa6\xe3\x13Y;0\x00\x00\x00\x00\x00\x00b\x15TwoFactor.QueryTime#1h\x0f\x88\x01\x01')
-
-async def recv(conn):
-	while True:
-		data = await conn.recv()
-		parse_response(data)
 
 # To test a message's decoding:
 # msg = "CLmdtLLJvf7t5QESEBRD03J1KBMlnaPyKh6VmBg="
@@ -147,95 +173,63 @@ async def login():
 	# 4. authSession.PollingWaitForResultAsync();
 	# 4a. Save the Guard Data which should be a JWT that will allow us to bypass login in the future
 	# 5. steamUser.LogOn( new SteamUser.LogOnDetails)
-	endpoint = "ext1-syd1.steamserver.net:27037"
-	async with websockets.connect(f"wss://{endpoint}/cmsocket/") as conn:
-		spawn(recv(conn))
 
-		# Before trying to log in, can we just get time synchronization?
-		# msg = message_types["TwoFactor"].CTwoFactor_Time_Request()
-		# emsg = 9804 # or use 151 once we're authed
-		# hdr = steammessages_base_pb2.CMsgProtoBufHeader(
-			# target_job_name="TwoFactor.QueryTime#1",
-			# jobid_source=1,
-		# )
-		# hdr = hdr.SerializeToString()
-		# data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
-		# await conn.send(data)
-
-		user = "rosuav"
-		password = "not-my-real-password"
-		import getpass; password = getpass.getpass()
-		pk = requests.post("https://steamcommunity.com/login/getrsakey", {"username": user}).json()
-		key = rsa.PublicKey(int(pk["publickey_mod"], 16),
-			int(pk["publickey_exp"], 16))
-		password = password.encode("ascii") # Encoding error? See if Steam uses UTF-8.
-		password = base64.b64encode(rsa.encrypt(password, key))
-		login = protobuf_http("Authentication", "BeginAuthSessionViaCredentials",
-			device_friendly_name="SteamAuthPy",
-			account_name=user,
-			website_id="Mobile",
-			platform_type=1, # Steam client
-			#guard_data=details.GuardData, # Retain this to allow passwordless relogin
-			encrypted_password=password,
-			encryption_timestamp=int(pk["timestamp"]),
-			#device_details = new CAuthentication_DeviceDetails
-			remember_login=True,
-			persistence=1,
-			device_details={"platform_type": 1, "app_type": 1},
-			# optional .CAuthentication_DeviceDetails device_details = 9;
-			# optional uint32 language = 11;
-			# optional int32 qos_level = 12 [default = 2];
-		)
-		twofer = getpass.getpass("2FA: ")
-		protobuf_http("Authentication", "UpdateAuthSessionWithSteamGuardCode",
-			client_id=login.client_id,
-			steamid=login.steamid,
-			code=twofer,
-			code_type=3,
-		)
-		sess = protobuf_http("Authentication", "PollAuthSessionStatus",
-			client_id=login.client_id,
-			request_id=login.request_id,
-		)
-		data = {f.name: v for f, v in sess.ListFields()}
-		#with open("SECRET.json", "w") as f: json.dump(data, f)
-		print(list(data))
-		print("----")
-		emsg = 9804 # or use 151 once we're authed
-		hdr = steammessages_base_pb2.CMsgProtoBufHeader(
-			#messageid=emsg, # Does this need to be here as well?
-			# Do we need to set the source job ID?
-			target_job_name="Authentication.BeginAuthSessionViaCredentials#1",
-			jobid_source=123,
-			jobid_target=123,
-		)
-		hdr = hdr.SerializeToString()
-		# data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
-		#print(base64.b64encode(data))
-		#import hashlib; print(hashlib.sha256(data).hexdigest())
-		#await conn.send(data)
-		print("Sent...")
-		await asyncio.sleep(3)
-		print("Ending.")
+	user = "rosuav"
+	password = "not-my-real-password"
+	import getpass; password = getpass.getpass()
+	pk = requests.post("https://steamcommunity.com/login/getrsakey", {"username": user}).json()
+	key = rsa.PublicKey(int(pk["publickey_mod"], 16),
+		int(pk["publickey_exp"], 16))
+	password = password.encode("ascii") # Encoding error? See if Steam uses UTF-8.
+	password = base64.b64encode(rsa.encrypt(password, key))
+	login = protobuf_http("Authentication", "BeginAuthSessionViaCredentials",
+		device_friendly_name="SteamAuthPy",
+		account_name=user,
+		website_id="Mobile",
+		platform_type=1, # Steam client
+		#guard_data=details.GuardData, # Retain this to allow passwordless relogin
+		encrypted_password=password,
+		encryption_timestamp=int(pk["timestamp"]),
+		#device_details = new CAuthentication_DeviceDetails
+		remember_login=True,
+		persistence=1,
+		device_details={"platform_type": 1, "app_type": 1},
+		# optional .CAuthentication_DeviceDetails device_details = 9;
+		# optional uint32 language = 11;
+		# optional int32 qos_level = 12 [default = 2];
+	)
+	twofer = getpass.getpass("2FA: ")
+	protobuf_http("Authentication", "UpdateAuthSessionWithSteamGuardCode",
+		client_id=login.client_id,
+		steamid=login.steamid,
+		code=twofer,
+		code_type=3,
+	)
+	sess = protobuf_http("Authentication", "PollAuthSessionStatus",
+		client_id=login.client_id,
+		request_id=login.request_id,
+	)
+	data = {f.name: v for f, v in sess.ListFields()}
+	#with open("SECRET.json", "w") as f: json.dump(data, f)
+	print(list(data))
+	print("----")
+	emsg = 9804 # or use 151 once we're authed
+	hdr = steammessages_base_pb2.CMsgProtoBufHeader(
+		#messageid=emsg, # Does this need to be here as well?
+		# Do we need to set the source job ID?
+		target_job_name="Authentication.BeginAuthSessionViaCredentials#1",
+		jobid_source=123,
+		jobid_target=123,
+	)
+	hdr = hdr.SerializeToString()
+	# data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
+	#print(base64.b64encode(data))
+	#import hashlib; print(hashlib.sha256(data).hexdigest())
+	#await steamsock.send(data)
 
 async def get_time():
-	endpoint = "ext1-syd1.steamserver.net:27037"
-	async with websockets.connect(f"wss://{endpoint}/cmsocket/") as conn:
-		spawn(recv(conn))
-
-		emsg = 9805 # ClientHello
-		import steammessages_clientserver_login_pb2
-		msg = steammessages_clientserver_login_pb2.CMsgClientHello(protocol_version=65581)
-		hdr = steammessages_base_pb2.CMsgProtoBufHeader(
-			jobid_source=2,
-		)
-		hdr = hdr.SerializeToString()
-		data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
-		await conn.send(data)
-		await protobuf_ws(conn, "TwoFactor", "QueryTime")
-		print("Sent...")
-		await asyncio.sleep(3)
-		print("Ending.")
+	reply = await protobuf_ws("TwoFactor", "QueryTime")
+	print("Time", reply)
 
 async def notifs():
 	with open("SECRET.json") as f: creds = json.load(f)
