@@ -82,7 +82,7 @@ async def websocket_listen(notif=None):
 			data = await steamsock.recv()
 			parse_response(data)
 
-async def protobuf_ws(service, method, /, **args):
+async def protobuf_ws(service, method, credentials=None, /, **args):
 	if steamsock is None:
 		f = asyncio.Future()
 		spawn(websocket_listen(f))
@@ -91,7 +91,7 @@ async def protobuf_ws(service, method, /, **args):
 	meth = srv.methods_by_name[method] # Error here likely means a bug, wrong method name for this service
 	# Using private attribute _concrete_class seems wrong, is there a better way to construct this?
 	msg = meth.input_type._concrete_class(**args)
-	emsg = 9804
+	emsg = 151 if credentials else 9804
 	job = next(jobid)
 	jobs_pending[job] = fut = asyncio.Future()
 	hdr = steammessages_base_pb2.CMsgProtoBufHeader(
