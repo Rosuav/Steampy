@@ -166,7 +166,10 @@ async def login():
 
 async def notifs():
 	with open("SECRET.json") as f: creds = json.load(f)
-	prefs = protobuf_http("SteamNotification", "GetPreferences", _http_method="GET", _credentials=creds)
+	prefs = protobuf_http("SteamNotification", "GetSteamNotifications", _http_method="GET", _credentials=creds,
+		include_hidden=True,
+		include_pinned_counts=True,
+	)
 	print(prefs)
 
 async def main():
