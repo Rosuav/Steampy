@@ -3,6 +3,7 @@ import base64
 import itertools
 import json
 import traceback
+import zlib
 import requests
 import websockets
 import rsa # ImportError? 'pip install rsa' or equivalent.
@@ -125,10 +126,22 @@ def parse_response(data):
 			# print("Next four bytes", int.from_bytes(data[4:8], "little"))
 			multi = steammessages_base_pb2.CMsgMulti.FromString(data[8:])
 			print("Multi", multi)
+			msg = multi.message_body
 			if multi.size_unzipped:
 				print("HAS COMPRESSED DATA")
 				# Not sure what to do with this yet
-			msg = multi.message_body
+				print(multi.message_body)
+				print(data)
+				print("Body size", len(multi.message_body))
+				print("Total size", len(data))
+				# NOTE: The compressed stream has a gzip header/trailer. Python's zlib module
+				# can parse this, but needs to be told. I'm not sure whether the window size
+				# matters here (I'm using the maximum possible of 15, plus 16 to signal that
+				# it's a gzip header instead of zlib), so if weird decompression failures
+				# begin happening, try adjusting this second parameter.
+				msg = zlib.decompress(msg, 31)
+				print("DECOMPRESSED:")
+				print(msg)
 			while msg:
 				size = int.from_bytes(msg[:4], "little")
 				raw = msg[4:4+size]
@@ -153,8 +166,6 @@ def parse_response(data):
 	else:
 		# Non-protobuf messages, not currently parsed
 		print("Non-protobuf", emsg, data[4:])
-
-parse_response(b'\x01\x00\x00\x80\x00\x00\x00\x00\x12\xbf\x80\x80\x80\x00;\x00\x00\x00\x93\x00\x00\x803\x00\x00\x00\t\x00\x00\x00\x00\x00\x00\x00\x00\x10\x8f\xa6\xe3\x13Y;0\x00\x00\x00\x00\x00\x00b\x15TwoFactor.QueryTime#1h\x0f\x88\x01\x01')
 
 # To test a message's decoding:
 # msg = "CLmdtLLJvf7t5QESEBRD03J1KBMlnaPyKh6VmBg="
@@ -182,7 +193,7 @@ async def login():
 		int(pk["publickey_exp"], 16))
 	password = password.encode("ascii") # Encoding error? See if Steam uses UTF-8.
 	password = base64.b64encode(rsa.encrypt(password, key))
-	login = protobuf_http("Authentication", "BeginAuthSessionViaCredentials",
+	login = await protobuf_ws("Authentication", "BeginAuthSessionViaCredentials",
 		device_friendly_name="SteamAuthPy",
 		account_name=user,
 		website_id="Mobile",
@@ -199,17 +210,18 @@ async def login():
 		# optional int32 qos_level = 12 [default = 2];
 	)
 	twofer = getpass.getpass("2FA: ")
-	protobuf_http("Authentication", "UpdateAuthSessionWithSteamGuardCode",
-		client_id=login.client_id,
+	print(await protobuf_ws("Authentication", "UpdateAuthSessionWithSteamGuardCode",
+		#client_id=login.client_id,
 		steamid=login.steamid,
 		code=twofer,
 		code_type=3,
-	)
-	sess = protobuf_http("Authentication", "PollAuthSessionStatus",
-		client_id=login.client_id,
-		request_id=login.request_id,
+	))
+	sess = await protobuf_ws("Authentication", "PollAuthSessionStatus",
+		#client_id=login.client_id,
+		#request_id=login.request_id,
 	)
 	data = {f.name: v for f, v in sess.ListFields()}
+	print(data)
 	#with open("SECRET.json", "w") as f: json.dump(data, f)
 	print(list(data))
 	print("----")
@@ -240,8 +252,8 @@ async def notifs():
 	print(prefs)
 
 async def main():
-	# await login()
+	await login()
 	# await notifs()
-	await get_time()
+	# await get_time()
 
-#asyncio.run(main())
+asyncio.run(main())
