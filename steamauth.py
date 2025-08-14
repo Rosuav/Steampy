@@ -62,8 +62,9 @@ def protobuf_http(service, method, /, _http_method="POST", _credentials=None, **
 	return meth.output_type._concrete_class.FromString(resp.content)
 
 steamsock = None
-jobid = itertools.count(1)
+jobid = itertools.count(2)
 jobs_pending = { }
+_have_credentials = False # Hack - change the emsg when we have a steamid
 async def websocket_listen(notif=None):
 	global steamsock
 	endpoint = "ext1-syd1.steamserver.net:27037"
@@ -72,7 +73,7 @@ async def websocket_listen(notif=None):
 		import steammessages_clientserver_login_pb2
 		msg = steammessages_clientserver_login_pb2.CMsgClientHello(protocol_version=65581)
 		hdr = steammessages_base_pb2.CMsgProtoBufHeader(
-			jobid_source=2,
+			jobid_source=1,
 		)
 		hdr = hdr.SerializeToString()
 		data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
@@ -82,7 +83,7 @@ async def websocket_listen(notif=None):
 			data = await steamsock.recv()
 			parse_response(data)
 
-async def protobuf_ws(service, method, credentials=None, /, **args):
+async def protobuf_ws(service, method, /, **args):
 	if steamsock is None:
 		f = asyncio.Future()
 		spawn(websocket_listen(f))
@@ -91,7 +92,7 @@ async def protobuf_ws(service, method, credentials=None, /, **args):
 	meth = srv.methods_by_name[method] # Error here likely means a bug, wrong method name for this service
 	# Using private attribute _concrete_class seems wrong, is there a better way to construct this?
 	msg = meth.input_type._concrete_class(**args)
-	emsg = 151 if credentials else 9804
+	emsg = 151 if _have_credentials else 9804
 	job = next(jobid)
 	jobs_pending[job] = fut = asyncio.Future()
 	hdr = steammessages_base_pb2.CMsgProtoBufHeader(
@@ -210,6 +211,7 @@ async def login():
 		# optional int32 qos_level = 12 [default = 2];
 	)
 	twofer = getpass.getpass("2FA: ")
+	global _have_credentials; _have_credentials = True
 	print(await protobuf_ws("Authentication", "UpdateAuthSessionWithSteamGuardCode",
 		#client_id=login.client_id,
 		steamid=login.steamid,
