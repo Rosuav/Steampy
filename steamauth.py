@@ -64,8 +64,20 @@ def protobuf_http(service, method, /, _http_method="POST", _credentials=None, **
 		raise Exception() # can't be bothered
 	return meth.output_type._concrete_class.FromString(resp.content)
 
+def timecheck():
+	reply = protobuf_http("TwoFactor", "QueryTime")
+	import time
+	print(reply)
+	print(reply.server_time - time.time())
+
+def make_qr():
+	print(protobuf_http("Authentication", "BeginAuthSessionViaQR"))
+	# Hypothetically, the QR code auth flow would start with the above, then generate a QR code
+	# from reply.challenge_url. The user points the Steam app at the challenge URL QR code. We
+	# poll (every reply.interval seconds) using PollAuthSessionStatus until we get a reply.
+
 steamsock = None
-jobid = itertools.count(2) # Job #1 is the "Hello" message, to avoid collisions
+jobid = itertools.count(0xdeaded) # An arbitrary bluebottle so that job IDs are recognizable in dumps
 jobs_pending = { }
 _have_credentials = False # Hack - change the emsg when we have a steamid
 async def websocket_listen(notif=None):
@@ -107,18 +119,6 @@ async def protobuf_ws(service, method, /, **args):
 	data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
 	await steamsock.send(data)
 	return await fut
-
-def timecheck():
-	reply = protobuf_http("TwoFactor", "QueryTime")
-	import time
-	print(reply)
-	print(reply.server_time - time.time())
-
-def make_qr():
-	print(protobuf_http("Authentication", "BeginAuthSessionViaQR"))
-	# Hypothetically, the QR code auth flow would start with the above, then generate a QR code
-	# from reply.challenge_url. The user points the Steam app at the challenge URL QR code. We
-	# poll (every reply.interval seconds) using PollAuthSessionStatus until we get a reply.
 
 def parse_response(data):
 	emsg = int.from_bytes(data[:4], "little")
@@ -170,8 +170,16 @@ def parse_response(data):
 			print("Unknown emsg", emsg, data)
 			return
 	else:
-		# Non-protobuf messages, not currently parsed
-		print("Non-protobuf", emsg, data[4:])
+		# Non-protobuf messages
+		if emsg == 113:
+			# Job failed. No idea what info we get, but the job ID seems to be found three bytes into
+			# the packet body (7 bytes in, counting the emsg four bytes).
+			jobid = int.from_bytes(data[7:11], "little")
+			fut, cls = jobs_pending.pop(jobid, (None, None))
+			if fut: fut.set_exception(Exception()) # TODO: Better exception
+		else:
+			print("Unknown non-pb", emsg, data[4:])
+			print("Pending:", jobs_pending)
 
 # To test a message's decoding:
 # msg = "CLmdtLLJvf7t5QESEBRD03J1KBMlnaPyKh6VmBg="
@@ -215,14 +223,20 @@ async def login():
 		# optional uint32 language = 11;
 		# optional int32 qos_level = 12 [default = 2];
 	)
-	print("LOGIN", login.allowed_confirmations)
+	# Email code is 2, device code (TOTP) is 3
+	# None is 1, so it might be that we'd see that rather than an empty list?
+	# An empty list seems to happen when the password is wrong.
+	confirm = [c.confirmation_type for c in login.allowed_confirmations]
+	print("LOGIN", confirm)
+	if 3 in confirm:
+		print("Device code needed - may be able to automate this")
 	twofer = getpass.getpass("2FA: ")
 	global _have_credentials; _have_credentials = True
-	print(await protobuf_ws("Authentication", "UpdateAuthSessionWithSteamGuardCode",
-		#client_id=login.client_id,
+	print("Send code:", await protobuf_ws("Authentication", "UpdateAuthSessionWithSteamGuardCode",
+		client_id=login.client_id,
 		steamid=login.steamid,
 		code=twofer,
-		code_type=3,
+		code_type=login.allowed_confirmations[0].confirmation_type,
 	))
 	sess = await protobuf_ws("Authentication", "PollAuthSessionStatus",
 		#client_id=login.client_id,
@@ -233,19 +247,6 @@ async def login():
 	#with open("SECRET.json", "w") as f: json.dump(data, f)
 	print(list(data))
 	print("----")
-	emsg = 9804 # or use 151 once we're authed
-	hdr = steammessages_base_pb2.CMsgProtoBufHeader(
-		#messageid=emsg, # Does this need to be here as well?
-		# Do we need to set the source job ID?
-		target_job_name="Authentication.BeginAuthSessionViaCredentials#1",
-		jobid_source=123,
-		jobid_target=123,
-	)
-	hdr = hdr.SerializeToString()
-	# data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
-	#print(base64.b64encode(data))
-	#import hashlib; print(hashlib.sha256(data).hexdigest())
-	#await steamsock.send(data)
 
 async def get_time():
 	reply = await protobuf_ws("TwoFactor", "QueryTime")
