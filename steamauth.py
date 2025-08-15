@@ -43,6 +43,9 @@ def spawn(awaitable):
 	task.add_done_callback(task_done)
 	return task
 
+def pb_to_dict(pb):
+	return {f.name: v for f, v in pb.ListFields()}
+
 def protobuf_http(service, method, /, _http_method="POST", _credentials=None, **args):
 	srv = services_by_name[service] # Error here probably means we need to import another module of protobufs
 	meth = srv.methods_by_name[method] # Error here likely means a bug, wrong method name for this service
@@ -62,7 +65,7 @@ def protobuf_http(service, method, /, _http_method="POST", _credentials=None, **
 	return meth.output_type._concrete_class.FromString(resp.content)
 
 steamsock = None
-jobid = itertools.count(2)
+jobid = itertools.count(2) # Job #1 is the "Hello" message, to avoid collisions
 jobs_pending = { }
 _have_credentials = False # Hack - change the emsg when we have a steamid
 async def websocket_listen(notif=None):
@@ -94,7 +97,8 @@ async def protobuf_ws(service, method, /, **args):
 	msg = meth.input_type._concrete_class(**args)
 	emsg = 151 if _have_credentials else 9804
 	job = next(jobid)
-	jobs_pending[job] = fut = asyncio.Future()
+	fut = asyncio.Future()
+	jobs_pending[job] = (fut, meth.output_type._concrete_class)
 	hdr = steammessages_base_pb2.CMsgProtoBufHeader(
 		target_job_name=service + "." + method + "#1",
 		jobid_source=job,
@@ -123,26 +127,26 @@ def parse_response(data):
 		emsg &= 0x7fffffff
 		if emsg == 1:
 			# EMsgMulti
-			# No idea what the next four bytes mean
-			# print("Next four bytes", int.from_bytes(data[4:8], "little"))
+			#print("Multi", len(data) - 8)
+			# No idea what the next four bytes mean - they seem to be zero.
+			# They'd be the header length if this were a single-message packet.
+			#print("Next four bytes", int.from_bytes(data[4:8], "little"))
 			multi = steammessages_base_pb2.CMsgMulti.FromString(data[8:])
-			print("Multi", multi)
 			msg = multi.message_body
 			if multi.size_unzipped:
-				print("HAS COMPRESSED DATA")
-				# Not sure what to do with this yet
-				print(multi.message_body)
-				print(data)
-				print("Body size", len(multi.message_body))
-				print("Total size", len(data))
+				#print("HAS COMPRESSED DATA", multi.size_unzipped)
 				# NOTE: The compressed stream has a gzip header/trailer. Python's zlib module
 				# can parse this, but needs to be told. I'm not sure whether the window size
 				# matters here (I'm using the maximum possible of 15, plus 16 to signal that
 				# it's a gzip header instead of zlib), so if weird decompression failures
 				# begin happening, try adjusting this second parameter.
-				msg = zlib.decompress(msg, 31)
-				print("DECOMPRESSED:")
-				print(msg)
+				decomp = zlib.decompressobj(31)
+				msg = decomp.decompress(msg)
+				if not decomp.eof:
+					print("Decompression not complete!!")
+					# TODO: How to handle this?? Probably fail hard.
+				#print("DECOMPRESSED:", len(msg))
+				#print("Residue:", decomp.unused_data) # Should always be empty, I think?
 			while msg:
 				size = int.from_bytes(msg[:4], "little")
 				raw = msg[4:4+size]
@@ -154,13 +158,14 @@ def parse_response(data):
 			print("PBWrapped", msg)
 		elif emsg == 147:
 			# EMsgServiceMethodResponse
-			print("Response", data)
-			# Again, not sure what the next four bytes mean
-			hdr = steammessages_base_pb2.CMsgProtoBufHeader.FromString(data[8:])
-			fut = jobs_pending.pop(hdr.jobid_target, None)
+			print("Response", len(data))
+			hdrlen = int.from_bytes(data[4:8], "little")
+			ret = hdr = steammessages_base_pb2.CMsgProtoBufHeader.FromString(data[8:8+hdrlen])
+			fut, cls = jobs_pending.pop(hdr.jobid_target, (None, None))
 			print(hdr)
-			# TODO: Dig another level in and get the actual result
-			if fut: fut.set_result(hdr)
+			print(pb_to_dict(hdr))
+			if cls: ret = cls.FromString(data[8+hdrlen:])
+			if fut: fut.set_result(ret)
 		else:
 			print("Unknown emsg", emsg, data)
 			return
@@ -186,7 +191,7 @@ async def login():
 	# 4a. Save the Guard Data which should be a JWT that will allow us to bypass login in the future
 	# 5. steamUser.LogOn( new SteamUser.LogOnDetails)
 
-	user = "rosuav"
+	user = "sanctified_toaster"
 	password = "not-my-real-password"
 	import getpass; password = getpass.getpass()
 	pk = requests.post("https://steamcommunity.com/login/getrsakey", {"username": user}).json()
@@ -210,6 +215,7 @@ async def login():
 		# optional uint32 language = 11;
 		# optional int32 qos_level = 12 [default = 2];
 	)
+	print("LOGIN", login.allowed_confirmations)
 	twofer = getpass.getpass("2FA: ")
 	global _have_credentials; _have_credentials = True
 	print(await protobuf_ws("Authentication", "UpdateAuthSessionWithSteamGuardCode",
