@@ -80,19 +80,29 @@ steamsock = None
 jobid = itertools.count(0xdeaded) # An arbitrary bluebottle so that job IDs are recognizable in dumps
 jobs_pending = { }
 _have_credentials = False # Hack - change the emsg when we have a steamid
+
+async def send_protobuf_msg(emsg, hdr, msg, output_type):
+	job = next(jobid)
+	if output_type:
+		fut = asyncio.Future()
+		jobs_pending[job] = (fut, output_type)
+	hdr.jobid_source = job
+	hdr = hdr.SerializeToString()
+	data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
+	await steamsock.send(data)
+	if output_type:
+		return await fut
+
 async def websocket_listen(notif=None):
 	global steamsock
 	endpoint = "ext1-syd1.steamserver.net:27037"
 	async with websockets.connect(f"wss://{endpoint}/cmsocket/") as steamsock:
-		emsg = 9805 # ClientHello
 		import steammessages_clientserver_login_pb2
-		msg = steammessages_clientserver_login_pb2.CMsgClientHello(protocol_version=65581)
-		hdr = steammessages_base_pb2.CMsgProtoBufHeader(
-			jobid_source=1,
-		)
-		hdr = hdr.SerializeToString()
-		data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
-		await steamsock.send(data)
+		await send_protobuf_msg(
+			9805, # ClientHello
+			steammessages_base_pb2.CMsgProtoBufHeader(),
+			steammessages_clientserver_login_pb2.CMsgClientHello(protocol_version=65581),
+			None)
 		if notif: notif.set_result(steamsock)
 		while True:
 			data = await steamsock.recv()
@@ -106,19 +116,13 @@ async def protobuf_ws(service, method, /, **args):
 	srv = services_by_name[service] # Error here probably means we need to import another module of protobufs
 	meth = srv.methods_by_name[method] # Error here likely means a bug, wrong method name for this service
 	# Using private attribute _concrete_class seems wrong, is there a better way to construct this?
-	msg = meth.input_type._concrete_class(**args)
-	emsg = 151 if _have_credentials else 9804
-	job = next(jobid)
-	fut = asyncio.Future()
-	jobs_pending[job] = (fut, meth.output_type._concrete_class)
-	hdr = steammessages_base_pb2.CMsgProtoBufHeader(
-		target_job_name=service + "." + method + "#1",
-		jobid_source=job,
-	)
-	hdr = hdr.SerializeToString()
-	data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
-	await steamsock.send(data)
-	return await fut
+	return await send_protobuf_msg(
+		151 if _have_credentials else 9804,
+		steammessages_base_pb2.CMsgProtoBufHeader(
+			service + "." + method + "#1",
+		),
+		meth.input_type._concrete_class(**args),
+		meth.output_type._concrete_class)
 
 def parse_response(data):
 	emsg = int.from_bytes(data[:4], "little")
@@ -166,8 +170,11 @@ def parse_response(data):
 			print(pb_to_dict(hdr))
 			if cls: ret = cls.FromString(data[8+hdrlen:])
 			if fut: fut.set_result(ret)
+		elif emsg == 751:
+			global _have_credentials; _have_credentials = True
+			print("Logged on successfully!", len(data))
 		else:
-			print("Unknown emsg", emsg, data)
+			print("Unknown PB emsg", emsg, data)
 			return
 	else:
 		# Non-protobuf messages
@@ -178,7 +185,7 @@ def parse_response(data):
 			fut, cls = jobs_pending.pop(jobid, (None, None))
 			if fut: fut.set_exception(Exception()) # TODO: Better exception
 		else:
-			print("Unknown non-pb", emsg, data[4:])
+			print("Unknown non-pb emsg", emsg, data[4:])
 			print("Pending:", jobs_pending)
 
 # To test a message's decoding:
@@ -228,25 +235,29 @@ async def login():
 	# An empty list seems to happen when the password is wrong.
 	confirm = [c.confirmation_type for c in login.allowed_confirmations]
 	print("LOGIN", confirm)
+	print("Poll", await protobuf_ws("Authentication", "PollAuthSessionStatus",
+		client_id=login.client_id,
+		request_id=login.request_id,
+	))
 	if 3 in confirm:
 		print("Device code needed - may be able to automate this")
 	twofer = getpass.getpass("2FA: ")
-	global _have_credentials; _have_credentials = True
-	print("Send code:", await protobuf_ws("Authentication", "UpdateAuthSessionWithSteamGuardCode",
+	sendcode = await protobuf_ws("Authentication", "UpdateAuthSessionWithSteamGuardCode",
 		client_id=login.client_id,
 		steamid=login.steamid,
 		code=twofer,
-		code_type=login.allowed_confirmations[0].confirmation_type,
-	))
+		code_type=confirm[0] if confirm else 4,
+	)
+	print("Send code", sendcode)
 	sess = await protobuf_ws("Authentication", "PollAuthSessionStatus",
-		#client_id=login.client_id,
-		#request_id=login.request_id,
+		client_id=login.client_id,
+		request_id=login.request_id,
 	)
 	data = {f.name: v for f, v in sess.ListFields()}
-	print(data)
-	#with open("SECRET.json", "w") as f: json.dump(data, f)
-	print(list(data))
-	print("----")
+	if "refresh_token" not in data:
+		print("Login failed, available keys:", list(data))
+		return
+	with open("SECRET.json", "w") as f: json.dump(data, f)
 
 async def get_time():
 	reply = await protobuf_ws("TwoFactor", "QueryTime")
@@ -254,15 +265,93 @@ async def get_time():
 
 async def notifs():
 	with open("SECRET.json") as f: creds = json.load(f)
-	prefs = protobuf_http("SteamNotification", "GetSteamNotifications", _http_method="GET", _credentials=creds,
-		include_hidden=True,
-		include_pinned_counts=True,
+	import steammessages_clientserver_login_pb2
+	f = asyncio.Future()
+	spawn(websocket_listen(f))
+	await f
+	# Grab the Steam ID from the JWT
+	steamid = json.loads(base64.b64decode(creds["refresh_token"].split(".")[1]))["sub"]
+	resp = await send_protobuf_msg(
+		5514, # ClientLogOn
+		steammessages_base_pb2.CMsgProtoBufHeader(
+			steamid=int(steamid)
+		),
+		steammessages_clientserver_login_pb2.CMsgClientLogon(
+			# obfuscated_private_ip
+			account_name=creds["account_name"],
+			should_remember_password=True,
+			protocol_version=65581,
+			access_token=creds["refresh_token"],
+	# optional uint32 protocol_version = 1;
+	# optional uint32 deprecated_obfustucated_private_ip = 2;
+	# optional uint32 cell_id = 3;
+	# optional uint32 last_session_id = 4;
+	# optional uint32 client_package_version = 5;
+	# optional string client_language = 6;
+	# optional uint32 client_os_type = 7;
+	# optional bool should_remember_password = 8 [default = false];
+	# optional string wine_version = 9;
+	# optional uint32 deprecated_10 = 10;
+	# optional .CMsgIPAddress obfuscated_private_ip = 11;
+	# optional uint32 deprecated_public_ip = 20;
+	# optional uint32 qos_level = 21;
+	# optional fixed64 client_supplied_steam_id = 22;
+	# optional .CMsgIPAddress public_ip = 23;
+	# optional bytes machine_id = 30;
+	# optional uint32 launcher_type = 31 [default = 0];
+	# optional uint32 ui_mode = 32 [default = 0];
+	# optional uint32 chat_mode = 33 [default = 0];
+	# optional bytes steam2_auth_ticket = 41;
+	# optional string email_address = 42;
+	# optional fixed32 rtime32_account_creation = 43;
+	# optional string account_name = 50;
+	# optional string password = 51;
+	# optional string game_server_token = 52;
+	# optional string login_key = 60;
+	# optional bool was_converted_deprecated_msg = 70 [default = false];
+	# optional string anon_user_target_account_name = 80;
+	# optional fixed64 resolved_user_steam_id = 81;
+	# optional int32 eresult_sentryfile = 82;
+	# optional bytes sha_sentryfile = 83;
+	# optional string auth_code = 84;
+	# optional int32 otp_type = 85;
+	# optional uint32 otp_value = 86;
+	# optional string otp_identifier = 87;
+	# optional bool steam2_ticket_request = 88;
+	# optional bytes sony_psn_ticket = 90;
+	# optional string sony_psn_service_id = 91;
+	# optional bool create_new_psn_linked_account_if_needed = 92 [default = false];
+	# optional string sony_psn_name = 93;
+	# optional int32 game_server_app_id = 94;
+	# optional bool steamguard_dont_remember_computer = 95;
+	# optional string machine_name = 96;
+	# optional string machine_name_userchosen = 97;
+	# optional string country_override = 98;
+	# optional bool is_steam_box = 99;
+	# optional uint64 client_instance_id = 100;
+	# optional string two_factor_code = 101;
+	# optional bool supports_rate_limit_response = 102;
+	# optional string web_logon_nonce = 103;
+	# optional int32 priority_reason = 104;
+	# optional .CMsgClientSecret embedded_client_secret = 105;
+	# optional bool disable_partner_autogrants = 106;
+	# optional bool is_steam_deck = 107;
+	# optional string access_token = 108;
+	# optional bool is_chrome_os = 109;
+	# optional bool is_tesla = 110;
+		),
+		steammessages_clientserver_login_pb2.CMsgClientLogonResponse,
 	)
-	print(prefs)
+	print("Got response", resp)
+	# prefs = protobuf_http("SteamNotification", "GetSteamNotifications", _http_method="GET", _credentials=creds,
+		# include_hidden=True,
+		# include_pinned_counts=True,
+	# )
+	# print(prefs)
 
 async def main():
-	await login()
-	# await notifs()
+	# await login()
+	await notifs()
 	# await get_time()
 
 asyncio.run(main())
