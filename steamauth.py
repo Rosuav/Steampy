@@ -11,7 +11,8 @@ import rsa # ImportError? 'pip install rsa' or equivalent.
 # Protobuf structures are all in a git-ignored directory
 import sys, importlib
 sys.path.append("protobuf")
-import steammessages_base_pb2 # Might not need this eventually
+import steammessages_base_pb2 # Might not need these eventually
+import steammessages_clientserver_login_pb2
 services_by_name = { }
 def import_service(modname):
 	mod = importlib.import_module(modname)
@@ -79,6 +80,7 @@ def make_qr():
 steamsock = None
 jobid = itertools.count(0xdeaded) # An arbitrary bluebottle so that job IDs are recognizable in dumps
 jobs_pending = { }
+special_jobid = { }
 _have_credentials = False # Hack - change the emsg when we have a steamid
 
 async def send_protobuf_msg(emsg, hdr, msg, output_type):
@@ -86,6 +88,7 @@ async def send_protobuf_msg(emsg, hdr, msg, output_type):
 	if output_type:
 		fut = asyncio.Future()
 		jobs_pending[job] = (fut, output_type)
+		if emsg == 5514: special_jobid[751] = job # hack
 	hdr.jobid_source = job
 	hdr = hdr.SerializeToString()
 	data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
@@ -97,7 +100,6 @@ async def websocket_listen(notif=None):
 	global steamsock
 	endpoint = "ext1-syd1.steamserver.net:27037"
 	async with websockets.connect(f"wss://{endpoint}/cmsocket/") as steamsock:
-		import steammessages_clientserver_login_pb2
 		await send_protobuf_msg(
 			9805, # ClientHello
 			steammessages_base_pb2.CMsgProtoBufHeader(),
@@ -156,23 +158,23 @@ def parse_response(data):
 				raw = msg[4:4+size]
 				msg = msg[size+4:]
 				parse_response(raw)
-		elif emsg == 2:
-			# EMsgProtobufWrapped - not sure if we see this
-			msg = steammessages_base_pb2.CMsgProtobufWrapped.FromString(data[4:]).message_body
-			print("PBWrapped", msg)
-		elif emsg == 147:
-			# EMsgServiceMethodResponse
-			print("Response", len(data))
-			hdrlen = int.from_bytes(data[4:8], "little")
-			ret = hdr = steammessages_base_pb2.CMsgProtoBufHeader.FromString(data[8:8+hdrlen])
-			fut, cls = jobs_pending.pop(hdr.jobid_target, (None, None))
-			print(hdr)
-			print(pb_to_dict(hdr))
-			if cls: ret = cls.FromString(data[8+hdrlen:])
-			if fut: fut.set_result(ret)
+			return
+		hdrlen = int.from_bytes(data[4:8], "little")
+		ret = hdr = steammessages_base_pb2.CMsgProtoBufHeader.FromString(data[8:8+hdrlen])
+		print("emsg", emsg, "jobid", hdr.jobid_target)
+		fut, cls = jobs_pending.pop(hdr.jobid_target, (None, None))
+		# If the emsg signals a special job type, fetch up its response info from there.
+		# Otherwise, keep what we have (hence no defaults here)
+		try: fut, cls = jobs_pending.pop(special_jobid.pop(emsg))
+		except KeyError: pass
+		if cls: ret = cls.FromString(data[8+hdrlen:])
+		if fut: fut.set_result(ret)
+		if emsg == 147:
+			# EMsgServiceMethodResponse, normal response to normal query
+			pass
 		elif emsg == 751:
 			global _have_credentials; _have_credentials = True
-			print("Logged on successfully!", len(data))
+			print("Logged on successfully!")
 		else:
 			print("Unknown PB emsg", emsg, data)
 			return
@@ -186,7 +188,6 @@ def parse_response(data):
 			if fut: fut.set_exception(Exception()) # TODO: Better exception
 		else:
 			print("Unknown non-pb emsg", emsg, data[4:])
-			print("Pending:", jobs_pending)
 
 # To test a message's decoding:
 # msg = "CLmdtLLJvf7t5QESEBRD03J1KBMlnaPyKh6VmBg="
@@ -265,7 +266,6 @@ async def get_time():
 
 async def notifs():
 	with open("SECRET.json") as f: creds = json.load(f)
-	import steammessages_clientserver_login_pb2
 	f = asyncio.Future()
 	spawn(websocket_listen(f))
 	await f
@@ -342,7 +342,7 @@ async def notifs():
 		),
 		steammessages_clientserver_login_pb2.CMsgClientLogonResponse,
 	)
-	print("Got response", resp)
+	print("Logged in, looking for notifications.")
 	# prefs = protobuf_http("SteamNotification", "GetSteamNotifications", _http_method="GET", _credentials=creds,
 		# include_hidden=True,
 		# include_pinned_counts=True,
