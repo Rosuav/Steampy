@@ -195,7 +195,7 @@ def parse_response(data):
 		elif emsg not in {
 			"ServiceMethodResponse", "ClientServersAvailable", "ClientLicenseList", "ClientWalletInfoUpdate",
 			"ClientGameConnectTokens", "ClientEmailAddrInfo", "ClientFriendsList", "ClientPlayerNicknameList",
-			"ClientFriendsGroupsList",
+			"ClientFriendsGroupsList", "ClientIsLimitedAccount", "ClientPlayingSessionState",
 		}:
 			# Report any new discoveries, but don't bother noisily reporting the ones we know about.
 			if msg:
