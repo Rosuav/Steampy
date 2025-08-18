@@ -20,12 +20,15 @@ def import_service(modname):
 		if n.startswith("CMsg"): CMsg[n.removeprefix("CMsg")] = msg._concrete_class
 import_service("steammessages_base_pb2")
 import_service("steammessages_auth.steamclient_pb2")
-import_service("steammessages_twofactor.steamclient_pb2")
+import_service("steammessages_econ.steamclient_pb2")
+import_service("steammessages_familygroups.steamclient_pb2")
+import_service("steammessages_inventory.steamclient_pb2")
 import_service("steammessages_notifications.steamclient_pb2")
+import_service("steammessages_twofactor.steamclient_pb2")
 import_service("steammessages_clientserver_pb2")
 import_service("steammessages_clientserver_2_pb2")
-import_service("steammessages_clientserver_login_pb2")
 import_service("steammessages_clientserver_friends_pb2")
+import_service("steammessages_clientserver_login_pb2")
 #sys.path.append("pb_webui")
 #import_service("service_steamnotification_pb2")
 # TODO: Figure out how to load up two separate namespaces of protobufs. Currently,
@@ -142,7 +145,7 @@ async def protobuf_ws(service, method, /, **args):
 	return await send_protobuf_msg(
 		151 if _have_credentials else 9804,
 		CMsg["ProtoBufHeader"](
-			service + "." + method + "#1",
+			target_job_name=service + "." + method + "#1",
 		),
 		meth.input_type._concrete_class(**args),
 		meth.output_type._concrete_class)
@@ -311,11 +314,11 @@ async def notifs():
 	spawn(websocket_listen(f))
 	await f
 	# Grab the Steam ID from the JWT
-	steamid = json.loads(base64.b64decode(creds["refresh_token"].split(".")[1]))["sub"]
-	resp = await send_protobuf_msg(
+	steamid = int(json.loads(base64.b64decode(creds["refresh_token"].split(".")[1]))["sub"])
+	login = await send_protobuf_msg(
 		EMsg["ClientLogon"],
 		CMsg["ProtoBufHeader"](
-			steamid=int(steamid)
+			steamid=steamid
 		),
 		CMsg["ClientLogon"](
 			# obfuscated_private_ip
@@ -384,16 +387,20 @@ async def notifs():
 		CMsg["ClientLogonResponse"],
 	)
 	print("Logged in, looking for notifications.")
-	# prefs = protobuf_http("SteamNotification", "GetSteamNotifications", _http_method="GET", _credentials=creds,
-		# include_hidden=True,
-		# include_pinned_counts=True,
-	# )
-	# print(prefs)
+	inv = await protobuf_ws("Inventory", "GetInventory",
+		appid=440,
+		steamid=steamid,
+	)
+	print("Inventory:", inv) # Why is this empty?
+	tok = await protobuf_ws("Econ", "GetTradeOfferAccessToken",
+		generate_new_token=True,
+	)
+	print("Token:", tok) # Nothing interesting coming back here
 	await asyncio.sleep(5)
 
 async def main():
 	# await login()
-	await notifs()
-	# await get_time()
+	# await notifs()
+	await get_time()
 
 asyncio.run(main())
