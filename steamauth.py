@@ -11,8 +11,6 @@ import rsa # ImportError? 'pip install rsa' or equivalent.
 # Protobuf structures are all in a git-ignored directory
 import sys, importlib
 sys.path.append("protobuf")
-import steammessages_base_pb2 # Might not need these eventually
-import steammessages_clientserver_login_pb2
 services_by_name = { }
 CMsg = { } # CMsg["ClientServersAvailable"] should be the class for EMsg("ClientServersAvailable")
 def import_service(modname):
@@ -20,9 +18,11 @@ def import_service(modname):
 	services_by_name.update(mod.DESCRIPTOR.services_by_name)
 	for n, msg in mod.DESCRIPTOR.message_types_by_name.items():
 		if n.startswith("CMsg"): CMsg[n.removeprefix("CMsg")] = msg._concrete_class
+import_service("steammessages_base_pb2")
 import_service("steammessages_auth.steamclient_pb2")
 import_service("steammessages_twofactor.steamclient_pb2")
 import_service("steammessages_clientserver_pb2")
+import_service("steammessages_clientserver_login_pb2")
 #sys.path.append("pb_webui")
 #import_service("service_steamnotification_pb2")
 # TODO: Figure out how to load up two separate namespaces of protobufs. Currently,
@@ -118,8 +118,8 @@ async def websocket_listen(notif=None):
 	async with websockets.connect(f"wss://{endpoint}/cmsocket/") as steamsock:
 		await send_protobuf_msg(
 			9805, # ClientHello
-			steammessages_base_pb2.CMsgProtoBufHeader(),
-			steammessages_clientserver_login_pb2.CMsgClientHello(protocol_version=65581),
+			CMsg["ProtoBufHeader"](),
+			CMsg["ClientHello"](protocol_version=65581),
 			None)
 		if notif: notif.set_result(steamsock)
 		while True:
@@ -136,7 +136,7 @@ async def protobuf_ws(service, method, /, **args):
 	# Using private attribute _concrete_class seems wrong, is there a better way to construct this?
 	return await send_protobuf_msg(
 		151 if _have_credentials else 9804,
-		steammessages_base_pb2.CMsgProtoBufHeader(
+		CMsg["ProtoBufHeader"](
 			service + "." + method + "#1",
 		),
 		meth.input_type._concrete_class(**args),
@@ -152,7 +152,7 @@ def parse_response(data):
 			# No idea what the next four bytes mean - they seem to be zero.
 			# They'd be the header length if this were a single-message packet.
 			#print("Next four bytes", int.from_bytes(data[4:8], "little"))
-			multi = steammessages_base_pb2.CMsgMulti.FromString(data[8:])
+			multi = CMsg["Multi"].FromString(data[8:])
 			msg = multi.message_body
 			if multi.size_unzipped:
 				#print("HAS COMPRESSED DATA", multi.size_unzipped)
@@ -175,7 +175,7 @@ def parse_response(data):
 				parse_response(raw)
 			return
 		hdrlen = int.from_bytes(data[4:8], "little")
-		ret = hdr = steammessages_base_pb2.CMsgProtoBufHeader.FromString(data[8:8+hdrlen])
+		ret = hdr = CMsg["ProtoBufHeader"].FromString(data[8:8+hdrlen])
 		fut, cls = jobs_pending.pop(hdr.jobid_target, (None, None))
 		# If the emsg signals a special job type, fetch up its response info from there.
 		# Otherwise, keep what we have (hence no defaults here)
@@ -292,10 +292,10 @@ async def notifs():
 	steamid = json.loads(base64.b64decode(creds["refresh_token"].split(".")[1]))["sub"]
 	resp = await send_protobuf_msg(
 		EMsg("ClientLogon"),
-		steammessages_base_pb2.CMsgProtoBufHeader(
+		CMsg["ProtoBufHeader"](
 			steamid=int(steamid)
 		),
-		steammessages_clientserver_login_pb2.CMsgClientLogon(
+		CMsg["ClientLogon"](
 			# obfuscated_private_ip
 			account_name=creds["account_name"],
 			should_remember_password=True,
@@ -359,7 +359,7 @@ async def notifs():
 	# optional bool is_chrome_os = 109;
 	# optional bool is_tesla = 110;
 		),
-		steammessages_clientserver_login_pb2.CMsgClientLogonResponse,
+		CMsg["ClientLogonResponse"],
 	)
 	print("Logged in, looking for notifications.")
 	# prefs = protobuf_http("SteamNotification", "GetSteamNotifications", _http_method="GET", _credentials=creds,
