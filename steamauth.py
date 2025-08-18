@@ -12,7 +12,7 @@ import rsa # ImportError? 'pip install rsa' or equivalent.
 import sys, importlib
 sys.path.append("protobuf")
 services_by_name = { }
-CMsg = { } # CMsg["ClientServersAvailable"] should be the class for EMsg("ClientServersAvailable")
+CMsg = { } # CMsg["ClientServersAvailable"] should be the class for EMsg["ClientServersAvailable"]
 def import_service(modname):
 	mod = importlib.import_module(modname)
 	services_by_name.update(mod.DESCRIPTOR.services_by_name)
@@ -22,23 +22,27 @@ import_service("steammessages_base_pb2")
 import_service("steammessages_auth.steamclient_pb2")
 import_service("steammessages_twofactor.steamclient_pb2")
 import_service("steammessages_clientserver_pb2")
+import_service("steammessages_clientserver_2_pb2")
 import_service("steammessages_clientserver_login_pb2")
+import_service("steammessages_clientserver_friends_pb2")
 #sys.path.append("pb_webui")
 #import_service("service_steamnotification_pb2")
 # TODO: Figure out how to load up two separate namespaces of protobufs. Currently,
 # loading anything from pb_webui breaks the main protobuf collection.
 
-# EMsg lookup convenience helper
+# EMsg lookup convenience helper. NOTE: The EMsg enumeration has a Name() method which
+# will do (most of) the work for us, however it cannot adequately handle duplicated IDs.
+# The enum contains some groups with a "Base" that also is the first message in the group,
+# so for our purposes, we need to skip the "Base" and take the actual message. Currently,
+# this is done without regard to the actual name; we simply keep the *last* rather than
+# the *first* when there is a collision. If iteration order cannot be relied upon for this
+# effect, then prioritize any name that does not contain "Base". (That's not always at the
+# end of the message name, though it usually is.)
 import enums_clientserver_pb2
-def EMsg(x):
-	"""Bidirectional name<->value lookup for EMsg constants
-
-	Strips the 'k_EMsg' prefixes so the names are all eg ServiceMethodResponse
-	"""
-	if isinstance(x, int):
-		return enums_clientserver_pb2.EMsg.Name(x).removeprefix("k_EMsg")
-	else:
-		return enums_clientserver_pb2.EMsg.Value("k_EMsg" + x)
+EMsg = { }
+for n, v in enums_clientserver_pb2.EMsg.items():
+	n = n.removeprefix("k_EMsg")
+	EMsg[v] = n; EMsg[n] = v
 
 def handle_errors(task):
 	try:
@@ -104,7 +108,7 @@ async def send_protobuf_msg(emsg, hdr, msg, output_type):
 	if output_type:
 		fut = asyncio.Future()
 		jobs_pending[job] = (fut, output_type)
-		if emsg == EMsg("ClientLogon"): special_jobid[EMsg("ClientLogOnResponse")] = job # hack
+		if emsg == EMsg["ClientLogon"]: special_jobid[EMsg["ClientLogOnResponse"]] = job # hack
 	hdr.jobid_source = job
 	hdr = hdr.SerializeToString()
 	data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
@@ -145,57 +149,62 @@ async def protobuf_ws(service, method, /, **args):
 def parse_response(data):
 	emsg = int.from_bytes(data[:4], "little")
 	is_protobuf = emsg & 0x80000000
-	emsg = EMsg(emsg & 0x7fffffff)
+	emsg = EMsg[emsg & 0x7fffffff]
 	if is_protobuf:
+		hdrlen = int.from_bytes(data[4:8], "little")
+		hdr = CMsg["ProtoBufHeader"].FromString(data[8:8+hdrlen])
+		# Try to find the right class to decode this with.
+		# If we have a job ID that we sent out, the class will have been jotted down in the pending list.
+		fut, cls = jobs_pending.pop(hdr.jobid_target, (None, None))
+		if not cls:
+			# If the emsg signals a special job type, fetch up its response info from there.
+			# Otherwise, keep what we have (hence no defaults here)
+			try: fut, cls = jobs_pending.pop(special_jobid.pop(emsg))
+			except KeyError: pass
+			if not cls: cls = CMsg.get(emsg) # For some signals, the EMsg has a corresponding CMsg with matching name.
+		# But if we still don't have a class, we can only work with the raw data.
+		msg = cls and cls.FromString(data[8+hdrlen:])
+		if fut: fut.set_result(msg or hdr)
+		# Special handling of some message types
 		if emsg == "Multi":
-			#print("Multi", len(data) - 8)
-			# No idea what the next four bytes mean - they seem to be zero.
-			# They'd be the header length if this were a single-message packet.
-			#print("Next four bytes", int.from_bytes(data[4:8], "little"))
-			multi = CMsg["Multi"].FromString(data[8:])
-			msg = multi.message_body
-			if multi.size_unzipped:
-				#print("HAS COMPRESSED DATA", multi.size_unzipped)
+			msgs = msg.message_body
+			if msg.size_unzipped:
 				# NOTE: The compressed stream has a gzip header/trailer. Python's zlib module
 				# can parse this, but needs to be told. I'm not sure whether the window size
 				# matters here (I'm using the maximum possible of 15, plus 16 to signal that
 				# it's a gzip header instead of zlib), so if weird decompression failures
 				# begin happening, try adjusting this second parameter.
 				decomp = zlib.decompressobj(31)
-				msg = decomp.decompress(msg)
+				msgs = decomp.decompress(msgs)
 				if not decomp.eof:
 					print("Decompression not complete!!")
 					# TODO: How to handle this?? Probably fail hard.
-				#print("DECOMPRESSED:", len(msg))
+				#print("DECOMPRESSED:", len(msgs))
 				#print("Residue:", decomp.unused_data) # Should always be empty, I think?
-			while msg:
-				size = int.from_bytes(msg[:4], "little")
-				raw = msg[4:4+size]
-				msg = msg[size+4:]
+			while msgs:
+				size = int.from_bytes(msgs[:4], "little")
+				raw = msgs[4:4+size]
+				msgs = msgs[size+4:]
 				parse_response(raw)
 			return
-		hdrlen = int.from_bytes(data[4:8], "little")
-		ret = hdr = CMsg["ProtoBufHeader"].FromString(data[8:8+hdrlen])
-		fut, cls = jobs_pending.pop(hdr.jobid_target, (None, None))
-		# If the emsg signals a special job type, fetch up its response info from there.
-		# Otherwise, keep what we have (hence no defaults here)
-		try: fut, cls = jobs_pending.pop(special_jobid.pop(emsg))
-		except KeyError: pass
-		if cls: ret = cls.FromString(data[8+hdrlen:])
-		if fut: fut.set_result(ret)
-		if emsg == "ServiceMethodResponse": # Normal response to normal query
-			pass
-		elif emsg == "ClientLogOnResponse":
+		elif emsg == "ClientLogOnResponse": # Special case: the EMsg has "Logon" where the CMsg has "LogOn".
 			global _have_credentials; _have_credentials = True
 			print("Logged on successfully!")
-		elif cls := CMsg.get(emsg):
-			if emsg not in {"ClientServersAvailable", "ClientLicenseList", "ClientWalletInfoUpdate", "ClientGameConnectTokens"}:
-				# Report any new discoveries, but don't bother noisily reporting the ones we know about.
+		elif emsg == "ClientAccountInfo":
+			pass
+		elif emsg not in {
+			"ServiceMethodResponse", "ClientServersAvailable", "ClientLicenseList", "ClientWalletInfoUpdate",
+			"ClientGameConnectTokens", "ClientEmailAddrInfo", "ClientFriendsList", "ClientPlayerNicknameList",
+			"ClientFriendsGroupsList",
+		}:
+			# Report any new discoveries, but don't bother noisily reporting the ones we know about.
+			if msg:
 				print("Unrecognized", emsg)
-				print(cls.FromString(data[8+hdrlen:]))
-		else:
-			print("Unknown PB emsg", emsg, data)
-			return
+				print(msg)
+			else:
+				print("Unparsed", emsg, "with headers")
+				print(hdr)
+				print(base64.b64encode(data[8+hdrlen:]))
 	else:
 		# Non-protobuf messages
 		if emsg == "DestJobFailed":
@@ -205,7 +214,7 @@ def parse_response(data):
 			fut, cls = jobs_pending.pop(jobid, (None, None))
 			if fut: fut.set_exception(Exception()) # TODO: Better exception
 		else:
-			if emsg not in {"ClientVACBanStatus"}:
+			if emsg not in {"ClientVACBanStatus", "ClientUpdateGuestPassesList"}:
 				print("Unknown non-pb emsg", emsg, data[4:])
 
 # To test a message's decoding:
@@ -291,7 +300,7 @@ async def notifs():
 	# Grab the Steam ID from the JWT
 	steamid = json.loads(base64.b64decode(creds["refresh_token"].split(".")[1]))["sub"]
 	resp = await send_protobuf_msg(
-		EMsg("ClientLogon"),
+		EMsg["ClientLogon"],
 		CMsg["ProtoBufHeader"](
 			steamid=int(steamid)
 		),
