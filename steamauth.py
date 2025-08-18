@@ -14,11 +14,15 @@ sys.path.append("protobuf")
 import steammessages_base_pb2 # Might not need these eventually
 import steammessages_clientserver_login_pb2
 services_by_name = { }
+CMsg = { } # CMsg["ClientServersAvailable"] should be the class for EMsg("ClientServersAvailable")
 def import_service(modname):
 	mod = importlib.import_module(modname)
 	services_by_name.update(mod.DESCRIPTOR.services_by_name)
+	for n, msg in mod.DESCRIPTOR.message_types_by_name.items():
+		if n.startswith("CMsg"): CMsg[n.removeprefix("CMsg")] = msg._concrete_class
 import_service("steammessages_auth.steamclient_pb2")
 import_service("steammessages_twofactor.steamclient_pb2")
+import_service("steammessages_clientserver_pb2")
 #sys.path.append("pb_webui")
 #import_service("service_steamnotification_pb2")
 # TODO: Figure out how to load up two separate namespaces of protobufs. Currently,
@@ -172,7 +176,6 @@ def parse_response(data):
 			return
 		hdrlen = int.from_bytes(data[4:8], "little")
 		ret = hdr = steammessages_base_pb2.CMsgProtoBufHeader.FromString(data[8:8+hdrlen])
-		print("emsg", emsg, "jobid", hdr.jobid_target)
 		fut, cls = jobs_pending.pop(hdr.jobid_target, (None, None))
 		# If the emsg signals a special job type, fetch up its response info from there.
 		# Otherwise, keep what we have (hence no defaults here)
@@ -185,6 +188,11 @@ def parse_response(data):
 		elif emsg == "ClientLogOnResponse":
 			global _have_credentials; _have_credentials = True
 			print("Logged on successfully!")
+		elif cls := CMsg.get(emsg):
+			if emsg not in {"ClientServersAvailable", "ClientLicenseList", "ClientWalletInfoUpdate", "ClientGameConnectTokens"}:
+				# Report any new discoveries, but don't bother noisily reporting the ones we know about.
+				print("Unrecognized", emsg)
+				print(cls.FromString(data[8+hdrlen:]))
 		else:
 			print("Unknown PB emsg", emsg, data)
 			return
@@ -197,7 +205,8 @@ def parse_response(data):
 			fut, cls = jobs_pending.pop(jobid, (None, None))
 			if fut: fut.set_exception(Exception()) # TODO: Better exception
 		else:
-			print("Unknown non-pb emsg", emsg, data[4:])
+			if emsg not in {"ClientVACBanStatus"}:
+				print("Unknown non-pb emsg", emsg, data[4:])
 
 # To test a message's decoding:
 # msg = "CLmdtLLJvf7t5QESEBRD03J1KBMlnaPyKh6VmBg="
