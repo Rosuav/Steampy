@@ -21,6 +21,7 @@ def import_service(modname):
 import_service("steammessages_base_pb2")
 import_service("steammessages_auth.steamclient_pb2")
 import_service("steammessages_twofactor.steamclient_pb2")
+import_service("steammessages_notifications.steamclient_pb2")
 import_service("steammessages_clientserver_pb2")
 import_service("steammessages_clientserver_2_pb2")
 import_service("steammessages_clientserver_login_pb2")
@@ -156,6 +157,12 @@ def parse_response(data):
 		# Try to find the right class to decode this with.
 		# If we have a job ID that we sent out, the class will have been jotted down in the pending list.
 		fut, cls = jobs_pending.pop(hdr.jobid_target, (None, None))
+		if hdr.target_job_name:
+			service, method = hdr.target_job_name.removesuffix("#1").split(".") # No idea what the #1 can be used for (presumably versioning, but how do we look it up?)
+			srv = services_by_name[service] # Error here probably means we need to import another module of protobufs
+			meth = srv.methods_by_name[method] # Error here likely means a bug, wrong method name for this service
+			cls = meth.input_type._concrete_class
+			# TODO: What do we do with the output type?
 		if not cls:
 			# If the emsg signals a special job type, fetch up its response info from there.
 			# Otherwise, keep what we have (hence no defaults here)
@@ -191,7 +198,13 @@ def parse_response(data):
 			global _have_credentials; _have_credentials = True
 			print("Logged on successfully!")
 		elif emsg == "ClientAccountInfo":
+			# Possibly record the username?
 			pass
+		elif emsg == "ServiceMethod":
+			# The server has sent us something. (We may need to respond??)
+			print("Service")
+			print(hdr)
+			print(msg)
 		elif emsg not in {
 			"ServiceMethodResponse", "ClientServersAvailable", "ClientLicenseList", "ClientWalletInfoUpdate",
 			"ClientGameConnectTokens", "ClientEmailAddrInfo", "ClientFriendsList", "ClientPlayerNicknameList",
