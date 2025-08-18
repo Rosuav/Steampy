@@ -24,6 +24,18 @@ import_service("steammessages_twofactor.steamclient_pb2")
 # TODO: Figure out how to load up two separate namespaces of protobufs. Currently,
 # loading anything from pb_webui breaks the main protobuf collection.
 
+# EMsg lookup convenience helper
+import enums_clientserver_pb2
+def EMsg(x):
+	"""Bidirectional name<->value lookup for EMsg constants
+
+	Strips the 'k_EMsg' prefixes so the names are all eg ServiceMethodResponse
+	"""
+	if isinstance(x, int):
+		return enums_clientserver_pb2.EMsg.Name(x).removeprefix("k_EMsg")
+	else:
+		return enums_clientserver_pb2.EMsg.Value("k_EMsg" + x)
+
 def handle_errors(task):
 	try:
 		exc = task.exception() # Also marks that the exception has been handled
@@ -88,7 +100,7 @@ async def send_protobuf_msg(emsg, hdr, msg, output_type):
 	if output_type:
 		fut = asyncio.Future()
 		jobs_pending[job] = (fut, output_type)
-		if emsg == 5514: special_jobid[751] = job # hack
+		if emsg == EMsg("ClientLogon"): special_jobid[EMsg("ClientLogOnResponse")] = job # hack
 	hdr.jobid_source = job
 	hdr = hdr.SerializeToString()
 	data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
@@ -128,11 +140,10 @@ async def protobuf_ws(service, method, /, **args):
 
 def parse_response(data):
 	emsg = int.from_bytes(data[:4], "little")
-	if emsg & 0x80000000:
-		# It's protobuf
-		emsg &= 0x7fffffff
-		if emsg == 1:
-			# EMsgMulti
+	is_protobuf = emsg & 0x80000000
+	emsg = EMsg(emsg & 0x7fffffff)
+	if is_protobuf:
+		if emsg == "Multi":
 			#print("Multi", len(data) - 8)
 			# No idea what the next four bytes mean - they seem to be zero.
 			# They'd be the header length if this were a single-message packet.
@@ -169,10 +180,9 @@ def parse_response(data):
 		except KeyError: pass
 		if cls: ret = cls.FromString(data[8+hdrlen:])
 		if fut: fut.set_result(ret)
-		if emsg == 147:
-			# EMsgServiceMethodResponse, normal response to normal query
+		if emsg == "ServiceMethodResponse": # Normal response to normal query
 			pass
-		elif emsg == 751:
+		elif emsg == "ClientLogOnResponse":
 			global _have_credentials; _have_credentials = True
 			print("Logged on successfully!")
 		else:
@@ -180,7 +190,7 @@ def parse_response(data):
 			return
 	else:
 		# Non-protobuf messages
-		if emsg == 113:
+		if emsg == "DestJobFailed":
 			# Job failed. No idea what info we get, but the job ID seems to be found three bytes into
 			# the packet body (7 bytes in, counting the emsg four bytes).
 			jobid = int.from_bytes(data[7:11], "little")
@@ -272,7 +282,7 @@ async def notifs():
 	# Grab the Steam ID from the JWT
 	steamid = json.loads(base64.b64decode(creds["refresh_token"].split(".")[1]))["sub"]
 	resp = await send_protobuf_msg(
-		5514, # ClientLogOn
+		EMsg("ClientLogon"),
 		steammessages_base_pb2.CMsgProtoBufHeader(
 			steamid=int(steamid)
 		),
