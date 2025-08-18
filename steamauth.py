@@ -109,7 +109,7 @@ async def send_protobuf_msg(emsg, hdr, msg, output_type):
 	if output_type:
 		fut = asyncio.Future()
 		jobs_pending[job] = (fut, output_type)
-		if emsg == EMsg["ClientLogon"]: special_jobid[EMsg["ClientLogOnResponse"]] = job # hack
+		if emsg == EMsg["ClientLogon"]: special_jobid["ClientLogOnResponse"] = job # hack
 	hdr.jobid_source = job
 	hdr = hdr.SerializeToString()
 	data = (emsg | 0x80000000).to_bytes(4, "little") + len(hdr).to_bytes(4, "little") + hdr + msg.SerializeToString()
@@ -389,6 +389,7 @@ async def notifs():
 		# include_pinned_counts=True,
 	# )
 	# print(prefs)
+	await asyncio.sleep(5)
 
 async def main():
 	# await login()
