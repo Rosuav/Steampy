@@ -227,13 +227,22 @@ def parse_response(data):
 			print(msg)
 		elif emsg == "ClientPersonaState":
 			for friend in msg.friends:
-				print("Player state:", friend.player_name, "is now", {
-					0: "offline",
-					1: "online",
-					2: "busy",
-					3: "away",
-					7: "invisible", # Shouldn't happen for friends, only for self
-				}.get(friend.persona_state, friend.persona_state))
+				print(
+					"Player state:", friend.player_name,
+					"is now", {
+						0: "offline",
+						1: "online",
+						2: "busy",
+						3: "away",
+						7: "invisible", # Shouldn't happen for friends, only for self
+					}.get(friend.persona_state, friend.persona_state),
+					# Game name doesn't seem to be provided, but the game ID is.
+					# There may also be friend.rich_presence which is an array of useful keys.
+					# The key steam_display seems to link to the format, which would need to
+					# be localized.
+					friend.game_name and "playing " + friend.game_name,
+				)
+				# print(friend)
 		elif emsg not in {
 			"ServiceMethodResponse", "ClientServersAvailable", "ClientLicenseList", "ClientWalletInfoUpdate",
 			"ClientGameConnectTokens", "ClientEmailAddrInfo", "ClientFriendsList", "ClientPlayerNicknameList",
