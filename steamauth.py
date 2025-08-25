@@ -22,9 +22,11 @@ import_service("steammessages_base_pb2")
 import_service("steammessages_auth.steamclient_pb2")
 import_service("steammessages_econ.steamclient_pb2")
 import_service("steammessages_familygroups.steamclient_pb2")
+import_service("steammessages_gamenotifications.steamclient_pb2")
 import_service("steammessages_inventory.steamclient_pb2")
 import_service("steammessages_notifications.steamclient_pb2")
 import_service("steammessages_player.steamclient_pb2")
+import_service("steammessages_remoteclient_service.steamclient_pb2")
 import_service("steammessages_twofactor.steamclient_pb2")
 import_service("steammessages_clientserver_pb2")
 import_service("steammessages_clientserver_2_pb2")
@@ -418,11 +420,11 @@ async def gamelist():
 async def notifs():
 	steamid = await login("sanctified_toaster")
 	print("Logged in, looking for notifications.")
-	tok = await protobuf_ws("Econ", "GetTradeOfferAccessToken",
-		generate_new_token=True,
-	)
-	print("Token:", tok) # Nothing interesting coming back here
-	await asyncio.sleep(5)
+	#tok = await protobuf_ws("Econ", "GetTradeOfferAccessToken",
+	#	generate_new_token=True,
+	#)
+	# print("Token:", tok) # Nothing interesting coming back here
+	await asyncio.sleep(300)
 
 async def main():
 	# await authenticate()
