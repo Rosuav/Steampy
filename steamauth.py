@@ -24,6 +24,7 @@ import_service("steammessages_econ.steamclient_pb2")
 import_service("steammessages_familygroups.steamclient_pb2")
 import_service("steammessages_inventory.steamclient_pb2")
 import_service("steammessages_notifications.steamclient_pb2")
+import_service("steammessages_player.steamclient_pb2")
 import_service("steammessages_twofactor.steamclient_pb2")
 import_service("steammessages_clientserver_pb2")
 import_service("steammessages_clientserver_2_pb2")
@@ -105,7 +106,7 @@ steamsock = None
 jobid = itertools.count(0xdeaded) # An arbitrary bluebottle so that job IDs are recognizable in dumps
 jobs_pending = { }
 special_jobid = { }
-_have_credentials = False # Hack - change the emsg when we have a steamid
+_have_credentials = None # Hack - change the emsg when we have a steamid
 
 async def send_protobuf_msg(emsg, hdr, msg, output_type):
 	job = next(jobid)
@@ -146,6 +147,7 @@ async def protobuf_ws(service, method, /, **args):
 		151 if _have_credentials else 9804,
 		CMsg["ProtoBufHeader"](
 			target_job_name=service + "." + method + "#1",
+			steamid=_have_credentials,
 		),
 		meth.input_type._concrete_class(**args),
 		meth.output_type._concrete_class)
@@ -198,8 +200,13 @@ def parse_response(data):
 				parse_response(raw)
 			return
 		elif emsg == "ClientLogOnResponse": # Special case: the EMsg has "Logon" where the CMsg has "LogOn".
-			global _have_credentials; _have_credentials = True
-			print("Logged on successfully!")
+			if msg.eresult == 1:
+				global _have_credentials; _have_credentials = msg.client_supplied_steamid
+				print("Logged on successfully!")
+			else:
+				print("Login failed")
+				print(hdr)
+				print(msg)
 		elif emsg == "ClientAccountInfo":
 			# Possibly record the username?
 			pass
