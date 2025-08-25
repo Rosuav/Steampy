@@ -181,6 +181,7 @@ def parse_response(data):
 			try: fut, cls = jobs_pending.pop(special_jobid.pop(emsg))
 			except KeyError: pass
 			if not cls: cls = CMsg.get(emsg) # For some signals, the EMsg has a corresponding CMsg with matching name.
+			if not cls: cls = CMsg.get(emsg.removeprefix("Client")) # Maybe try matching ClientPersonaChangeResponse with CMsgPersonaChangeResponse
 		# But if we still don't have a class, we can only work with the raw data.
 		msg = cls and cls.FromString(data[8+hdrlen:])
 		if fut: fut.set_result(msg or hdr)
@@ -224,10 +225,19 @@ def parse_response(data):
 			print("Service")
 			print(hdr)
 			print(msg)
+		elif emsg == "ClientPersonaState":
+			for friend in msg.friends:
+				print("Player state:", friend.player_name, "is now", {
+					0: "offline",
+					1: "online",
+					2: "busy",
+					3: "away",
+					7: "invisible", # Shouldn't happen for friends, only for self
+				}.get(friend.persona_state, friend.persona_state))
 		elif emsg not in {
 			"ServiceMethodResponse", "ClientServersAvailable", "ClientLicenseList", "ClientWalletInfoUpdate",
 			"ClientGameConnectTokens", "ClientEmailAddrInfo", "ClientFriendsList", "ClientPlayerNicknameList",
-			"ClientFriendsGroupsList", "ClientIsLimitedAccount", "ClientPlayingSessionState",
+			"ClientFriendsGroupsList", "ClientIsLimitedAccount", "ClientPlayingSessionState", "ClientPersonaChangeResponse",
 		}:
 			# Report any new discoveries, but don't bother noisily reporting the ones we know about.
 			if msg:
@@ -420,6 +430,18 @@ async def gamelist():
 async def notifs():
 	steamid = await login("sanctified_toaster")
 	print("Logged in, looking for notifications.")
+	await send_protobuf_msg(
+		EMsg["ClientChangeStatus"],
+		CMsg["ProtoBufHeader"](
+			steamid=steamid
+		),
+		CMsg["ClientChangeStatus"](
+			persona_state=1, # 1=Online, 0=Offline, 3=Away
+			persona_set_by_user=True,
+		),
+		None,
+	)
+	print("Should be online.")
 	#tok = await protobuf_ws("Econ", "GetTradeOfferAccessToken",
 	#	generate_new_token=True,
 	#)
