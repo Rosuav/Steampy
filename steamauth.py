@@ -254,7 +254,7 @@ def parse_response(data):
 # Seems to be fine; the inner layers of message don't seem to be an issue. It's the wrapping around them that
 # we're having issues with - the CMsgProtoBufHeader perhaps.
 
-async def login():
+async def authenticate():
 	# 1. requests.get("https://api.steampowered.com/ISteamDirectory/GetCMListForConnect/v1/").json()
 	# and pick out an entry with type "websockets"
 	# or just hard-code endpoint = "ext1-syd1.steamserver.net:27037"
@@ -323,8 +323,8 @@ async def get_time():
 	reply = await protobuf_ws("TwoFactor", "QueryTime")
 	print("Time", reply)
 
-async def notifs():
-	creds = CREDENTIALS["sanctified_toaster"]
+async def login(username):
+	creds = CREDENTIALS[username]
 	f = asyncio.Future()
 	spawn(websocket_listen(f))
 	await f
@@ -401,13 +401,23 @@ async def notifs():
 		),
 		CMsg["ClientLogonResponse"],
 	)
-	print("Logged in, looking for notifications.")
-	inv = await protobuf_ws("Inventory", "GetInventory",
-		appid=440,
+	return steamid
+
+async def gamelist():
+	steamid = await login("rosuav")
+	games = await protobuf_ws("Player", "GetOwnedGames",
 		steamid=steamid,
 	)
-	print("Inventory:", inv) # Why is inv.item_json an empty array?
-	return
+	print("You own", games.game_count, "games")
+	with open("../shed/appid.json") as f: appid = json.load(f)
+	appname = dict(zip(appid.values(), appid.keys()))
+	for game in sorted(games.games, key=lambda g: -g.playtime_forever):
+		playtime = "%d:%02d" % divmod(game.playtime_forever, 60)
+		print("%10s %s" % (playtime, appname.get(game.appid, game.appid)))
+
+async def notifs():
+	steamid = await login("sanctified_toaster")
+	print("Logged in, looking for notifications.")
 	tok = await protobuf_ws("Econ", "GetTradeOfferAccessToken",
 		generate_new_token=True,
 	)
@@ -415,7 +425,7 @@ async def notifs():
 	await asyncio.sleep(5)
 
 async def main():
-	# await login()
+	# await authenticate()
 	await notifs()
 	# await get_time()
 
