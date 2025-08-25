@@ -162,7 +162,7 @@ def parse_response(data):
 		# Try to find the right class to decode this with.
 		# If we have a job ID that we sent out, the class will have been jotted down in the pending list.
 		fut, cls = jobs_pending.pop(hdr.jobid_target, (None, None))
-		if hdr.target_job_name:
+		if hdr.target_job_name and emsg != "ServiceMethodResponse":
 			service, method = hdr.target_job_name.removesuffix("#1").split(".") # No idea what the #1 can be used for (presumably versioning, but how do we look it up?)
 			srv = services_by_name[service] # Error here probably means we need to import another module of protobufs
 			meth = srv.methods_by_name[method] # Error here likely means a bug, wrong method name for this service
@@ -398,7 +398,8 @@ async def notifs():
 		appid=440,
 		steamid=steamid,
 	)
-	print("Inventory:", inv) # Why is this empty?
+	print("Inventory:", inv) # Why is inv.item_json an empty array?
+	return
 	tok = await protobuf_ws("Econ", "GetTradeOfferAccessToken",
 		generate_new_token=True,
 	)
@@ -407,7 +408,7 @@ async def notifs():
 
 async def main():
 	# await login()
-	# await notifs()
-	await get_time()
+	await notifs()
+	# await get_time()
 
 asyncio.run(main())
