@@ -49,6 +49,11 @@ for n, v in enums_clientserver_pb2.EMsg.items():
 	n = n.removeprefix("k_EMsg")
 	EMsg[v] = n; EMsg[n] = v
 
+try:
+	with open("SECRET.json") as f: CREDENTIALS = json.load(f)
+except FileNotFoundError:
+	CREDENTIALS = {}
+
 def handle_errors(task):
 	try:
 		exc = task.exception() # Also marks that the exception has been handled
@@ -210,7 +215,9 @@ def parse_response(data):
 		elif emsg == "ClientAccountInfo":
 			# Possibly record the username?
 			pass
-		elif emsg == "ServiceMethod":
+		elif (emsg == "ServiceMethod"
+			# or emsg == "ServiceMethodResponse" # Quickly dump out all responses to our requests
+		):
 			# The server has sent us something. (We may need to respond??)
 			print("Service")
 			print(hdr)
@@ -309,14 +316,15 @@ async def login():
 	if "refresh_token" not in data:
 		print("Login failed, available keys:", list(data))
 		return
-	with open("SECRET.json", "w") as f: json.dump(data, f)
+	CREDENTIALS[user] = data
+	with open("SECRET.json", "w") as f: json.dump(CREDENTIALS, f)
 
 async def get_time():
 	reply = await protobuf_ws("TwoFactor", "QueryTime")
 	print("Time", reply)
 
 async def notifs():
-	with open("SECRET.json") as f: creds = json.load(f)
+	creds = CREDENTIALS["sanctified_toaster"]
 	f = asyncio.Future()
 	spawn(websocket_listen(f))
 	await f
