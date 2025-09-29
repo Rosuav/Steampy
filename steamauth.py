@@ -474,39 +474,4 @@ async def main():
 	await notifs()
 	# await get_time()
 
-def confirmations():
-	username = "sanctified_toaster"
-	# This requires more credentials than I have here, probably stuff that is only available
-	# during the authentication setup procedure. Will be fine if the two projects merge, as
-	# is likely to happen.
-	with open("../.steamguardrc") as f: user = json.load(f)[username]
-	params = {
-		"m": "react", "tag": "list", "t": int(time.time()),
-		"p": "android:12af6890-9b22-4e34-9bdb-8344b31b76fd",
-		"a": user["steamid"],
-		"k": generate_identity_hash(user["identity_secret"], "list"),
-	}
-	cookies = {
-		'steamLoginSecure': CREDENTIALS[username]["cookie"],
-	}
-	info = requests.get("https://steamcommunity.com/mobileconf/getlist", headers={"User-Agent": "okhttp/4.9.2"}, params=params, cookies=cookies)
-	data = info.json()
-	if "message" in data: print(data["message"])
-	if "detail" in data: print(data["detail"])
-	if data["success"]:
-		print(len(data["conf"]), "confirmations.")
-		for c in data["conf"]:
-			print("CONFIRMATION:")
-			json.dump(c, sys.stdout) # TODO: Print it more nicely
-			print()
-			if input("Confirm? <y/N> ").lower() == "y":
-				params["cid"] = c["id"]
-				params["ck"] = c["nonce"]
-				params["op"] = "allow"
-				resp = requests.post("https://steamcommunity.com/mobileconf/ajaxop", params, cookies=cookies)
-				print(resp)
-				print(resp.json())
-
-# confirmations(); sys.exit()
-
 asyncio.run(main())
