@@ -1,10 +1,7 @@
 import asyncio
 import base64
-import hashlib
-import hmac
 import itertools
 import json
-import time
 import traceback
 import zlib
 import requests
@@ -78,13 +75,6 @@ def spawn(awaitable):
 	all_tasks.append(task)
 	task.add_done_callback(task_done)
 	return task
-
-def generate_identity_hash(secret, tag, timestamp=None):
-	"""Generate a hash based on the identity_secret"""
-	secret = base64.b64decode(secret)
-	timestamp = (timestamp or int(time.time())).to_bytes(8, "big")
-	hash = hmac.new(secret, timestamp + tag.encode("ascii"), hashlib.sha1).digest()
-	return base64.b64encode(hash)
 
 def pb_to_dict(pb):
 	return {f.name: v for f, v in pb.ListFields()}
